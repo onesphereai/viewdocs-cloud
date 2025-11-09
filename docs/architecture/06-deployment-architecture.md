@@ -107,61 +107,115 @@ graph LR
 
 ```mermaid
 graph LR
-    Source[CodeCommit/GitHub<br/>develop branch] --> Build[Build Stage]
-    Build --> Test[Test Stage]
-    Test --> DevDeploy[Deploy Dev]
-    DevDeploy --> IntegrationTest[Integration Tests]
-    IntegrationTest --> ManualApproval1[Manual Approval<br/>Tech Lead]
-    ManualApproval1 --> UATDeploy[Deploy UAT]
-    UATDeploy --> E2ETest[E2E Tests]
-    E2ETest --> LoadTest[Load Tests]
-    LoadTest --> ManualApproval2[Manual Approval<br/>Product Owner]
-    ManualApproval2 --> ProdDeploy[Deploy Prod<br/>Blue-Green]
+    Source[Bitbucket<br/>develop branch] --> PR[Pull Request<br/>Code Review]
+    PR --> Merge[Merge to develop]
+    Merge --> Jenkins[Jenkins Pipeline<br/>Triggered]
+    Jenkins --> Build[Build Stage<br/>npm ci, lint, test]
+    Build --> Test[Unit Tests<br/>80% coverage]
+    Test --> DevDeploy[Deploy Dev<br/>CDK → CloudFormation<br/>Jenkins Agent: dev]
+    DevDeploy --> IntegrationTest[Integration Tests<br/>API health checks]
+    IntegrationTest --> HeatUAT[Heat Call/Change Control<br/>UAT Deployment Approval]
+    HeatUAT --> UATDeploy[Deploy UAT<br/>CDK → CloudFormation<br/>Jenkins Agent: uat]
+    UATDeploy --> E2ETest[E2E Tests<br/>Cypress]
+    E2ETest --> LoadTest[Load Tests<br/>Artillery]
+    LoadTest --> HeatProd[Heat Call/Change Control<br/>Production Deployment Approval]
+    HeatProd --> ProdDeploy[Deploy Prod<br/>Blue-Green<br/>Jenkins Agent: prod]
     ProdDeploy --> CanaryMonitor[Monitor Canary<br/>24-48 hours]
     CanaryMonitor --> GradualRollout[Gradual Rollout<br/>10%→100%]
 
     style ProdDeploy fill:#FF6B6B
-    style ManualApproval1 fill:#FFD93D
-    style ManualApproval2 fill:#FFD93D
+    style HeatUAT fill:#FFD93D
+    style HeatProd fill:#FFD93D
 ```
 
 ### 3.2 Pipeline Stages
 
-#### Stage 1: Source
+#### Stage 1: Source Control (Bitbucket)
 
-**Trigger**: Git commit to `develop` or `main` branch
+**Trigger**: Pull Request merged to `develop` branch
 
-**Source Control**:
-- **Primary**: AWS CodeCommit (within AWS)
-- **Alternative**: GitHub (with GitHub Actions integration)
+**Source Control**: Bitbucket
 
 **Branching Strategy**: GitFlow
-- `main` → Production
-- `develop` → Dev environment
-- `feature/*` → Local development
+- `main` → Production-ready code
+- `develop` → Dev environment (auto-deploy on merge)
+- `feature/*` → Local development, PR to develop
 - `release/*` → UAT environment
 - `hotfix/*` → Fast-track to production
 
-#### Stage 2: Build
+**Pull Request Workflow**:
+1. Developer creates feature branch: `feature/JIRA-123-add-bulk-download`
+2. Developer creates PR to `develop` branch
+3. Code review by Tech Lead (approval required)
+4. PR merged to `develop`
+5. Jenkins webhook triggered automatically
 
-**Tools**: npm, esbuild, TypeScript compiler
+#### Stage 2: Jenkins Webhook Trigger
+
+**Webhook**: Bitbucket webhook configured to trigger Jenkins job on PR merge to `develop`
+
+**Jenkins Job**: `viewdocs-cloud-pipeline`
+
+**Webhook Payload**:
+```json
+{
+  "repository": {
+    "name": "viewdocs-cloud"
+  },
+  "push": {
+    "changes": [{
+      "new": {
+        "name": "develop",
+        "type": "branch"
+      }
+    }]
+  }
+}
+```
+
+#### Stage 3: Build (Jenkins Agent: master)
+
+**Jenkins Stage**: `Build`
 
 **Steps**:
-1. Install dependencies: `npm ci` (faster than `npm install`, uses package-lock.json)
-2. Lint code: `npm run lint`
-3. Compile TypeScript: `tsc --noEmit` (type checking)
-4. Bundle Lambda functions: `esbuild` (tree-shaking, minification)
-5. Build Angular frontend: `ng build --configuration=production`
-6. Synth CDK: `cdk synth` (generate CloudFormation templates)
+1. Checkout code from Bitbucket
+2. Install dependencies: `npm ci`
+3. Lint code: `npm run lint`
+4. Compile TypeScript: `tsc --noEmit` (type checking)
+5. Bundle Lambda functions: `esbuild` (tree-shaking, minification)
+6. Build Angular frontend: `ng build --configuration=production`
+7. Synth CDK: `cdk synth` (generate CloudFormation templates)
 
 **Artifacts**:
 - Lambda function bundles (.zip files)
 - Frontend dist/ folder
 - CloudFormation templates (JSON)
+- Stored in Jenkins workspace for downstream stages
 
 **Build Time**: ~5 minutes
 
-#### Stage 3: Test
+**Jenkinsfile Example**:
+```groovy
+pipeline {
+    agent any
+
+    stages {
+        stage('Build') {
+            steps {
+                sh 'npm ci'
+                sh 'npm run lint'
+                sh 'tsc --noEmit'
+                sh 'npm run build'
+                sh 'cdk synth'
+            }
+        }
+    }
+}
+```
+
+#### Stage 4: Unit Tests (Jenkins Agent: master)
+
+**Jenkins Stage**: `Test`
 
 **Unit Tests**:
 ```bash
@@ -170,23 +224,78 @@ npm test -- --coverage --ci
 
 **Coverage Threshold**: 80% (branches, functions, lines, statements)
 
-**Test Reports**: JUnit XML format, published to CodeBuild
+**Test Reports**: JUnit XML format, published to Jenkins
 
-**Failed Tests**: Pipeline stops, sends SNS notification to team
+**Failed Tests**: Pipeline stops, sends notification to team (email/Slack)
 
-#### Stage 4: Deploy Dev
+**Jenkinsfile Example**:
+```groovy
+stage('Test') {
+    steps {
+        sh 'npm test -- --coverage --ci'
+    }
+    post {
+        always {
+            junit 'test-results/**/*.xml'
+            publishHTML([
+                reportDir: 'coverage',
+                reportFiles: 'index.html',
+                reportName: 'Coverage Report'
+            ])
+        }
+        failure {
+            emailext(
+                subject: "Build Failed: ${env.JOB_NAME} - ${env.BUILD_NUMBER}",
+                body: "Unit tests failed. Check Jenkins for details.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
 
-**Tool**: AWS CDK Pipelines (self-mutating)
+#### Stage 5: Deploy Dev (Jenkins Agent: dev)
+
+**Jenkins Stage**: `Deploy Dev`
+
+**Jenkins Agent**: Dedicated agent with AWS credentials for dev account (123456789012)
 
 **Steps**:
-1. Bootstrap CDK (if first deployment): `cdk bootstrap`
-2. Deploy all stacks: `cdk deploy --all --context env=dev --require-approval never`
-3. Update Lambda function code (if stack already exists)
-4. Wait for stack completion (CloudFormation polls)
+1. Switch to dev Jenkins agent
+2. Bootstrap CDK (if first deployment): `cdk bootstrap aws://123456789012/ap-southeast-2`
+3. Deploy all stacks: `cdk deploy --all --context env=dev --require-approval never`
+4. CloudFormation creates/updates stacks
+5. Wait for stack completion (CloudFormation polls)
 
 **Deployment Time**: ~10 minutes (first deployment), ~3 minutes (updates)
 
-#### Stage 5: Integration Tests
+**Jenkinsfile Example**:
+```groovy
+stage('Deploy Dev') {
+    agent { label 'jenkins-dev-agent' }
+    steps {
+        withAWS(credentials: 'aws-dev-credentials', region: 'ap-southeast-2') {
+            sh 'cdk deploy --all --context env=dev --require-approval never'
+        }
+    }
+    post {
+        success {
+            echo "Dev deployment successful"
+        }
+        failure {
+            emailext(
+                subject: "Dev Deployment Failed: ${env.JOB_NAME}",
+                body: "Dev deployment failed. Check CloudFormation console.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
+
+#### Stage 6: Integration Tests (Jenkins Agent: master)
+
+**Jenkins Stage**: `Integration Tests - Dev`
 
 **Framework**: Jest + axios
 
@@ -202,29 +311,123 @@ cd integration-tests
 npm test -- --env=dev
 ```
 
-**Failure Handling**: Pipeline stops, rollback dev deployment
+**Failure Handling**: Pipeline stops, sends alert (no automatic rollback)
 
-#### Stage 6: Manual Approval (Tech Lead)
+**Jenkinsfile Example**:
+```groovy
+stage('Integration Tests - Dev') {
+    steps {
+        sh 'cd integration-tests && npm test -- --env=dev'
+    }
+    post {
+        failure {
+            emailext(
+                subject: "Integration Tests Failed: ${env.JOB_NAME}",
+                body: "Dev integration tests failed. Manual investigation required.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
 
-**Approver**: Tech Lead or Senior Developer
+#### Stage 7: Heat Call/Change Control - UAT Approval
+
+**Approval System**: Heat System (Change Control)
+
+**Process**:
+1. Jenkins pipeline pauses at UAT deployment stage
+2. Automated Heat Call/Change request is raised (via API or manual)
+3. Change request includes:
+   - Deployment details (version, components, impact)
+   - Test results (unit, integration)
+   - Rollback plan
+   - Deployment window
+4. Change Advisory Board (CAB) reviews request
+5. Approval/rejection recorded in Heat System
+
+**Approvers**:
+- Tech Lead
+- UAT Environment Owner
+- Change Manager (for production-impacting changes)
 
 **Criteria**:
-- All unit tests passing
-- All integration tests passing
-- No critical security vulnerabilities (Snyk scan)
-- Code review completed
+- All unit tests passing ✅
+- All integration tests passing ✅
+- No critical security vulnerabilities (Snyk scan) ✅
+- Code review completed ✅
+- Deployment plan reviewed ✅
 
-**Notification**: SNS email to tech lead
+**Approval Timeout**: 24-48 hours (business days)
 
-**Approval Timeout**: 24 hours (auto-reject if not approved)
+**Jenkins Integration**:
+```groovy
+stage('UAT Approval - Heat System') {
+    steps {
+        script {
+            // Option 1: Manual input (Jenkins built-in)
+            input(
+                message: 'Heat Call approved for UAT deployment?',
+                ok: 'Deploy to UAT',
+                submitter: 'tech-lead,change-manager'
+            )
 
-#### Stage 7: Deploy UAT
+            // Option 2: Heat System API integration (if available)
+            // def changeId = sh(script: 'curl -X POST https://heat.example.com/api/changes ...', returnStdout: true).trim()
+            // waitForApproval(changeId)
+        }
+    }
+}
+```
 
-**Same as Dev Deploy**, but with `--context env=uat`
+#### Stage 8: Deploy UAT (Jenkins Agent: uat)
 
-**Additional Step**: Restore anonymized production data to UAT DynamoDB
+**Jenkins Stage**: `Deploy UAT`
 
-#### Stage 8: E2E Tests
+**Jenkins Agent**: Dedicated agent with AWS credentials for UAT account (234567890123)
+
+**Steps**:
+1. Switch to UAT Jenkins agent
+2. Bootstrap CDK (if first deployment): `cdk bootstrap aws://234567890123/ap-southeast-2`
+3. Deploy all stacks: `cdk deploy --all --context env=uat --require-approval never`
+4. CloudFormation creates/updates stacks
+5. Restore anonymized production data to UAT DynamoDB (optional)
+6. Wait for stack completion
+
+**Deployment Time**: ~10 minutes
+
+**Jenkinsfile Example**:
+```groovy
+stage('Deploy UAT') {
+    agent { label 'jenkins-uat-agent' }
+    steps {
+        withAWS(credentials: 'aws-uat-credentials', region: 'ap-southeast-2') {
+            sh 'cdk deploy --all --context env=uat --require-approval never'
+        }
+    }
+    post {
+        success {
+            echo "UAT deployment successful"
+            emailext(
+                subject: "UAT Deployment Success: ${env.JOB_NAME}",
+                body: "UAT environment ready for testing.",
+                to: "${env.QA_TEAM_EMAIL}"
+            )
+        }
+        failure {
+            emailext(
+                subject: "UAT Deployment Failed: ${env.JOB_NAME}",
+                body: "UAT deployment failed. Check CloudFormation console.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
+
+#### Stage 9: E2E Tests (Jenkins Agent: master)
+
+**Jenkins Stage**: `E2E Tests - UAT`
 
 **Framework**: Cypress
 
@@ -242,9 +445,33 @@ cd frontend
 npm run e2e:uat
 ```
 
-**Screenshots/Videos**: Saved to S3 for debugging
+**Screenshots/Videos**: Saved to Jenkins workspace for debugging
 
-#### Stage 9: Load Tests
+**Jenkinsfile Example**:
+```groovy
+stage('E2E Tests - UAT') {
+    steps {
+        sh 'cd frontend && npm run e2e:uat'
+    }
+    post {
+        always {
+            archiveArtifacts artifacts: 'frontend/cypress/screenshots/**/*.png', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'frontend/cypress/videos/**/*.mp4', allowEmptyArchive: true
+        }
+        failure {
+            emailext(
+                subject: "E2E Tests Failed: ${env.JOB_NAME}",
+                body: "UAT E2E tests failed. Check Jenkins artifacts for screenshots/videos.",
+                to: "${env.QA_TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
+
+#### Stage 10: Load Tests (Jenkins Agent: master)
+
+**Jenkins Stage**: `Load Tests - UAT`
 
 **Framework**: Artillery
 
@@ -285,19 +512,91 @@ scenarios:
 - Error rate < 1%
 - No throttling
 
-#### Stage 10: Manual Approval (Product Owner)
+**Jenkinsfile Example**:
+```groovy
+stage('Load Tests - UAT') {
+    steps {
+        sh 'artillery run artillery.yml --output report.json'
+        sh 'artillery report report.json --output report.html'
+    }
+    post {
+        always {
+            publishHTML([
+                reportDir: '.',
+                reportFiles: 'report.html',
+                reportName: 'Load Test Report'
+            ])
+        }
+        failure {
+            emailext(
+                subject: "Load Tests Failed: ${env.JOB_NAME}",
+                body: "UAT load tests failed. Check Jenkins for Artillery report.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
+}
+```
 
-**Approver**: Product Owner or Business Stakeholder
+#### Stage 11: Heat Call/Change Control - Production Approval
+
+**Approval System**: Heat System (Change Control)
+
+**Process**:
+1. Jenkins pipeline pauses at production deployment stage
+2. Heat Call/Change request is raised (Change Advisory Board review)
+3. Change request includes:
+   - Production deployment plan
+   - UAT test results (E2E, load tests)
+   - Risk assessment and mitigation
+   - Rollback plan and timeline
+   - Deployment window (typically off-peak hours)
+   - Stakeholder sign-offs
+4. Change Advisory Board (CAB) reviews request (may require meeting)
+5. Approval/rejection recorded in Heat System
+
+**Approvers**:
+- Product Owner
+- Tech Lead
+- Change Manager
+- Infrastructure Manager
+- Security Team (for security-related changes)
 
 **Criteria**:
-- UAT testing complete
-- E2E tests passing
-- Load tests passing
-- Release notes reviewed
+- UAT testing complete ✅
+- E2E tests passing ✅
+- Load tests passing (p95 < 500ms) ✅
+- Security scan passed ✅
+- Release notes reviewed ✅
+- Rollback plan documented ✅
+- Deployment window scheduled ✅
 
-**Approval Timeout**: 72 hours
+**Approval Timeout**: 48-72 hours (business days)
 
-#### Stage 11: Deploy Production (Blue-Green)
+**Deployment Window**: Typically scheduled for off-peak hours (e.g., Saturday 2:00 AM - 6:00 AM AEST)
+
+**Jenkins Integration**:
+```groovy
+stage('Production Approval - Heat System') {
+    steps {
+        script {
+            // Manual approval input
+            input(
+                message: 'Heat Call approved for Production deployment?',
+                ok: 'Deploy to Production',
+                submitter: 'product-owner,change-manager,tech-lead',
+                parameters: [
+                    string(name: 'HEAT_TICKET_ID', description: 'Heat Change Control Ticket ID')
+                ]
+            )
+
+            echo "Production deployment approved via Heat Ticket: ${HEAT_TICKET_ID}"
+        }
+    }
+}
+```
+
+#### Stage 12: Deploy Production (Blue-Green) (Jenkins Agent: prod)
 
 **Blue-Green Deployment Process**:
 
@@ -335,6 +634,8 @@ sequenceDiagram
     end
 ```
 
+**Jenkins Agent**: Dedicated agent with AWS credentials for production account (345678901234)
+
 **Deployment Steps**:
 
 1. **Deploy Green Environment**:
@@ -359,7 +660,7 @@ cdk deploy --all \
    - DynamoDB: Check for throttling
    - User feedback: Manual testing by canary tenants
 
-5. **Gradual Rollout**:
+5. **Gradual Rollout** (Manual or automated via Jenkins job):
    - Hour 0: 10% of tenants (50 tenants)
    - Hour 6: 25% of tenants (125 tenants)
    - Hour 12: 50% of tenants (250 tenants)
@@ -373,7 +674,60 @@ cdk deploy --all \
    - Delete old API Gateway stage: `prod-v1.2.3`
    - Delete old Lambda versions
 
-#### Stage 12: Post-Deployment Monitoring
+**Jenkinsfile Example**:
+```groovy
+stage('Deploy Production - Blue-Green') {
+    agent { label 'jenkins-prod-agent' }
+    steps {
+        withAWS(credentials: 'aws-prod-credentials', region: 'ap-southeast-2') {
+            script {
+                def version = env.BUILD_NUMBER
+
+                // Deploy green environment
+                sh """
+                    cdk deploy --all \
+                      --context env=prod \
+                      --context version=${version} \
+                      --require-approval never
+                """
+
+                // Route canary tenants (custom script or manual)
+                echo "Route canary tenants to green environment manually or via automation script"
+
+                // Send notification
+                emailext(
+                    subject: "Production Deployment Complete (Green): ${env.JOB_NAME} - v${version}",
+                    body: """
+                        Production green environment deployed successfully.
+
+                        Version: ${version}
+                        Environment: Green (canary)
+
+                        Next Steps:
+                        1. Monitor canary tenants for 24-48 hours
+                        2. Gradual rollout (10% → 100%)
+                        3. Decommission blue after 7 days
+
+                        CloudWatch Dashboard: https://console.aws.amazon.com/cloudwatch/...
+                    """,
+                    to: "${env.TEAM_EMAIL},${env.PRODUCT_OWNER_EMAIL}"
+                )
+            }
+        }
+    }
+    post {
+        failure {
+            emailext(
+                subject: "Production Deployment FAILED: ${env.JOB_NAME}",
+                body: "Production deployment failed. Rollback may be required. Check CloudFormation console.",
+                to: "${env.TEAM_EMAIL},${env.ONCALL_EMAIL}"
+            )
+        }
+    }
+}
+```
+
+#### Stage 13: Post-Deployment Monitoring
 
 **Automated Checks** (first 48 hours):
 - CloudWatch alarm: Error rate > 1% → SNS alert → auto-rollback
@@ -387,113 +741,214 @@ cdk deploy --all \
 
 ---
 
-## 4. CDK Pipelines Configuration
+## 4. Jenkins Pipeline Configuration
 
-### 4.1 CDK Pipeline Stack
+### 4.1 Complete Jenkinsfile
 
-```typescript
-// lib/stacks/pipeline-stack.ts
-import * as cdk from 'aws-cdk-lib';
-import * as pipelines from 'aws-cdk-lib/pipelines';
-import * as codecommit from 'aws-cdk-lib/aws-codecommit';
+```groovy
+// Jenkinsfile
+pipeline {
+    agent any
 
-export class ViewdocsPipelineStack extends cdk.Stack {
-  constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
-    super(scope, id, props);
+    environment {
+        AWS_DEFAULT_REGION = 'ap-southeast-2'
+        TEAM_EMAIL = 'viewdocs-team@example.com'
+        QA_TEAM_EMAIL = 'qa-team@example.com'
+        PRODUCT_OWNER_EMAIL = 'product-owner@example.com'
+        ONCALL_EMAIL = 'oncall@example.com'
+    }
 
-    const repo = codecommit.Repository.fromRepositoryName(
-      this,
-      'Repo',
-      'viewdocs'
-    );
+    stages {
+        stage('Build') {
+            steps {
+                sh 'npm ci'
+                sh 'npm run lint'
+                sh 'tsc --noEmit'
+                sh 'npm run build'
+                sh 'cdk synth'
+            }
+        }
 
-    const pipeline = new pipelines.CodePipeline(this, 'Pipeline', {
-      pipelineName: 'ViewdocsDeploymentPipeline',
-      synth: new pipelines.ShellStep('Synth', {
-        input: pipelines.CodePipelineSource.codeCommit(repo, 'develop'),
-        commands: [
-          'npm ci',
-          'npm run build',
-          'npm run test',
-          'npx cdk synth'
-        ]
-      })
-    });
+        stage('Test') {
+            steps {
+                sh 'npm test -- --coverage --ci'
+            }
+            post {
+                always {
+                    junit 'test-results/**/*.xml'
+                    publishHTML([
+                        reportDir: 'coverage',
+                        reportFiles: 'index.html',
+                        reportName: 'Coverage Report'
+                    ])
+                }
+            }
+        }
 
-    // Dev stage
-    const devStage = new ViewdocsApplicationStage(this, 'Dev', {
-      env: { account: '123456789012', region: 'ap-southeast-2' },
-      envName: 'dev'
-    });
-    pipeline.addStage(devStage, {
-      post: [
-        new pipelines.ShellStep('IntegrationTests', {
-          envFromCfnOutputs: {
-            API_ENDPOINT: devStage.apiEndpoint
-          },
-          commands: ['npm run test:integration']
-        })
-      ]
-    });
+        stage('Deploy Dev') {
+            agent { label 'jenkins-dev-agent' }
+            steps {
+                withAWS(credentials: 'aws-dev-credentials', region: "${AWS_DEFAULT_REGION}") {
+                    sh 'cdk deploy --all --context env=dev --require-approval never'
+                }
+            }
+        }
 
-    // UAT stage (with manual approval)
-    const uatStage = new ViewdocsApplicationStage(this, 'UAT', {
-      env: { account: '234567890123', region: 'ap-southeast-2' },
-      envName: 'uat'
-    });
-    pipeline.addStage(uatStage, {
-      pre: [new pipelines.ManualApprovalStep('ApproveUAT')],
-      post: [
-        new pipelines.ShellStep('E2ETests', {
-          commands: ['npm run e2e:uat']
-        }),
-        new pipelines.ShellStep('LoadTests', {
-          commands: ['npm run load-test:uat']
-        })
-      ]
-    });
+        stage('Integration Tests - Dev') {
+            steps {
+                sh 'cd integration-tests && npm test -- --env=dev'
+            }
+        }
 
-    // Prod stage (with manual approval)
-    const prodStage = new ViewdocsApplicationStage(this, 'Prod', {
-      env: { account: '345678901234', region: 'ap-southeast-2' },
-      envName: 'prod'
-    });
-    pipeline.addStage(prodStage, {
-      pre: [new pipelines.ManualApprovalStep('ApproveProd')]
-    });
-  }
+        stage('UAT Approval - Heat System') {
+            steps {
+                script {
+                    input(
+                        message: 'Heat Call approved for UAT deployment?',
+                        ok: 'Deploy to UAT',
+                        submitter: 'tech-lead,change-manager',
+                        parameters: [
+                            string(name: 'HEAT_TICKET_ID', description: 'Heat Change Control Ticket ID')
+                        ]
+                    )
+                    env.HEAT_UAT_TICKET = HEAT_TICKET_ID
+                }
+            }
+        }
+
+        stage('Deploy UAT') {
+            agent { label 'jenkins-uat-agent' }
+            steps {
+                withAWS(credentials: 'aws-uat-credentials', region: "${AWS_DEFAULT_REGION}") {
+                    sh 'cdk deploy --all --context env=uat --require-approval never'
+                }
+            }
+        }
+
+        stage('E2E Tests - UAT') {
+            steps {
+                sh 'cd frontend && npm run e2e:uat'
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'frontend/cypress/screenshots/**/*.png', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'frontend/cypress/videos/**/*.mp4', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Load Tests - UAT') {
+            steps {
+                sh 'artillery run artillery.yml --output report.json'
+                sh 'artillery report report.json --output report.html'
+            }
+            post {
+                always {
+                    publishHTML([
+                        reportDir: '.',
+                        reportFiles: 'report.html',
+                        reportName: 'Load Test Report'
+                    ])
+                }
+            }
+        }
+
+        stage('Production Approval - Heat System') {
+            steps {
+                script {
+                    input(
+                        message: 'Heat Call approved for Production deployment?',
+                        ok: 'Deploy to Production',
+                        submitter: 'product-owner,change-manager,tech-lead',
+                        parameters: [
+                            string(name: 'HEAT_TICKET_ID', description: 'Heat Change Control Ticket ID'),
+                            string(name: 'DEPLOYMENT_WINDOW', description: 'Scheduled Deployment Window (e.g., 2025-02-15 02:00-06:00 AEST)')
+                        ]
+                    )
+                    env.HEAT_PROD_TICKET = HEAT_TICKET_ID
+                    env.DEPLOYMENT_WINDOW = DEPLOYMENT_WINDOW
+                }
+            }
+        }
+
+        stage('Deploy Production - Blue-Green') {
+            agent { label 'jenkins-prod-agent' }
+            steps {
+                withAWS(credentials: 'aws-prod-credentials', region: "${AWS_DEFAULT_REGION}") {
+                    script {
+                        def version = env.BUILD_NUMBER
+                        sh """
+                            cdk deploy --all \
+                              --context env=prod \
+                              --context version=${version} \
+                              --require-approval never
+                        """
+                    }
+                }
+            }
+            post {
+                success {
+                    emailext(
+                        subject: "Production Deployment Complete (Green): ${env.JOB_NAME} - Build ${env.BUILD_NUMBER}",
+                        body: """
+                            Production green environment deployed successfully.
+
+                            Version: ${env.BUILD_NUMBER}
+                            Heat Ticket: ${env.HEAT_PROD_TICKET}
+                            Deployment Window: ${env.DEPLOYMENT_WINDOW}
+
+                            Next Steps:
+                            1. Monitor canary tenants for 24-48 hours
+                            2. Gradual rollout (10% → 100%)
+                            3. Decommission blue after 7 days
+                        """,
+                        to: "${env.TEAM_EMAIL},${env.PRODUCT_OWNER_EMAIL}"
+                    )
+                }
+                failure {
+                    emailext(
+                        subject: "Production Deployment FAILED: ${env.JOB_NAME}",
+                        body: "Production deployment failed. Rollback may be required.",
+                        to: "${env.TEAM_EMAIL},${env.ONCALL_EMAIL}"
+                    )
+                }
+            }
+        }
+    }
+
+    post {
+        failure {
+            emailext(
+                subject: "Pipeline Failed: ${env.JOB_NAME} - Build ${env.BUILD_NUMBER}",
+                body: "Pipeline failed at stage: ${env.STAGE_NAME}. Check Jenkins for details.",
+                to: "${env.TEAM_EMAIL}"
+            )
+        }
+    }
 }
 ```
 
-### 4.2 Application Stage
+### 4.2 Jenkins Agent Configuration
 
-```typescript
-// lib/application-stage.ts
-import * as cdk from 'aws-cdk-lib';
-import { DataStack } from './stacks/data-stack';
-import { ApiStack } from './stacks/api-stack';
-import { FrontendStack } from './stacks/frontend-stack';
+**Dev Agent** (jenkins-dev-agent):
+- AWS credentials for dev account (123456789012)
+- Node.js, npm, AWS CLI, CDK CLI installed
+- Access to dev VPC (if Lambda requires VPC)
 
-export class ViewdocsApplicationStage extends cdk.Stage {
-  public readonly apiEndpoint: cdk.CfnOutput;
+**UAT Agent** (jenkins-uat-agent):
+- AWS credentials for UAT account (234567890123)
+- Node.js, npm, AWS CLI, CDK CLI installed
+- Access to UAT VPC
 
-  constructor(scope: cdk.App, id: string, props: StageProps) {
-    super(scope, id, props);
+**Prod Agent** (jenkins-prod-agent):
+- AWS credentials for production account (345678901234)
+- Node.js, npm, AWS CLI, CDK CLI installed
+- Access to production VPC
+- Restricted access (only authorized personnel)
 
-    const dataStack = new DataStack(this, 'Data', { envName: props.envName });
-    const apiStack = new ApiStack(this, 'Api', {
-      envName: props.envName,
-      table: dataStack.table
-    });
-    const frontendStack = new FrontendStack(this, 'Frontend', {
-      envName: props.envName,
-      apiUrl: apiStack.apiUrl
-    });
-
-    this.apiEndpoint = apiStack.apiEndpoint;
-  }
-}
-```
+**Master Agent**:
+- Runs build, test, integration test, E2E test, load test stages
+- No AWS credentials (security best practice)
 
 ---
 
@@ -677,12 +1132,14 @@ new ViewdocsApplicationStage(app, 'Prod-DR', {
 
 ## Next Steps
 
-1. Set up CodeCommit repository
-2. Bootstrap CDK in all AWS accounts (dev, uat, prod)
-3. Create CDK Pipeline stack
-4. Configure manual approval notifications (SNS)
-5. Test pipeline with feature branch deployment
-6. Proceed to [07-infrastructure-architecture.md](07-infrastructure-architecture.md)
+1. Configure Bitbucket webhook to trigger Jenkins on PR merge to `develop`
+2. Set up Jenkins agents for dev, uat, and prod environments
+3. Configure AWS credentials in Jenkins for each environment
+4. Bootstrap CDK in all AWS accounts (dev, uat, prod)
+5. Create Jenkinsfile in repository root
+6. Configure Heat System integration (API or manual approval workflow)
+7. Test pipeline with feature branch deployment
+8. Proceed to [07-infrastructure-architecture.md](07-infrastructure-architecture.md)
 
 ---
 

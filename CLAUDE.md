@@ -69,6 +69,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Common Development Commands
 
+### Source Control (Bitbucket)
+```bash
+# Create feature branch
+git checkout -b feature/JIRA-123-description
+
+# Commit changes
+git add .
+git commit -m "feat: add bulk download feature"
+
+# Push to Bitbucket
+git push origin feature/JIRA-123-description
+
+# Create Pull Request via Bitbucket UI
+# After PR approval, merge to develop triggers Jenkins pipeline
+```
+
 ### CDK Infrastructure
 ```bash
 # Install dependencies
@@ -81,13 +97,13 @@ cdk bootstrap aws://ACCOUNT-ID/ap-southeast-4
 # Synthesize CloudFormation templates
 cdk synth
 
-# Deploy to dev environment
+# Deploy to dev environment (via Jenkins or manual)
 cdk deploy --all --context env=dev
 
-# Deploy to UAT environment
+# Deploy to UAT environment (via Jenkins or manual)
 cdk deploy --all --context env=uat
 
-# Deploy to prod environment
+# Deploy to prod environment (via Jenkins only - requires Heat approval)
 cdk deploy --all --context env=prod
 
 # Destroy stack (dev/uat only)
@@ -335,13 +351,34 @@ DOC#<docId>                COMMENT#<timestamp>#<commentId>  Document comment
 
 ## Deployment Strategy
 
+### CI/CD Pipeline (Bitbucket + Jenkins)
+- **Source Control**: Bitbucket
+- **CI/CD**: Jenkins with dedicated agents per environment
+- **Deployment**: CDK → CloudFormation
+- **Approvals**: Heat System (Change Control) for UAT and Production
+
+### Pipeline Flow
+```
+Bitbucket PR (merged to develop)
+  → Jenkins Webhook Trigger
+  → Build & Test
+  → Deploy Dev (jenkins-dev-agent)
+  → Integration Tests
+  → Heat Call Approval (UAT)
+  → Deploy UAT (jenkins-uat-agent)
+  → E2E Tests + Load Tests
+  → Heat Call Approval (Production)
+  → Deploy Prod Blue-Green (jenkins-prod-agent)
+  → Monitor Canary → Gradual Rollout
+```
+
 ### Environments
-- **Dev**: Rapid iteration, auto-deploy on commit to `develop` branch
-- **UAT**: Stable for testing, manual approval required
-- **Prod**: Blue-green deployment with canary tenant rollout
+- **Dev**: Auto-deploy on merge to `develop` branch
+- **UAT**: Heat System approval required
+- **Prod**: Heat System approval + scheduled deployment window (off-peak hours)
 
 ### Blue-Green Deployment for Multi-Tenant
-1. Deploy new version to "green" API Gateway stage
+1. Deploy new version to "green" API Gateway stage (via Jenkins prod agent)
 2. Select 1-2 canary tenants, route via DNS to green stage
 3. Monitor for 24-48 hours (CloudWatch alarms)
 4. Gradual rollout: 10% → 25% → 50% → 100% of tenants
@@ -355,6 +392,11 @@ aws apigateway update-stage --rest-api-id <api-id> --stage-name prod --patch-ope
 # Or rollback CDK deployment
 cdk deploy --all --context env=prod --rollback
 ```
+
+### Heat System Integration
+- UAT deployments require Heat Call approval (24-48 hour turnaround)
+- Production deployments require Heat Change Control with CAB review (48-72 hour turnaround)
+- Deployment windows scheduled for off-peak hours (e.g., Saturday 2:00-6:00 AM AEST)
 
 ## Monitoring & Alerting
 
