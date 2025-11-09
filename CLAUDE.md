@@ -48,9 +48,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Data Isolation**: DynamoDB partition key design with tenant_id prefix
 - **No Cross-Tenant Access**: Strict authorization checks on every request
 
+### Serverless & Non-VPC (ADR-012)
+- **Lambda WITHOUT VPC**: All Lambda functions deployed without VPC for cost savings ($1,992/year) and performance (faster cold starts)
+- **Public Endpoints**: Lambda connects to AWS services (DynamoDB, S3, Secrets Manager) via public endpoints with IAM authentication
+- **Direct Connect**: Public VIF with IPsec VPN tunnel to on-premise systems (IES, CMOD, FRS)
+- **No NAT Gateways**: No VPC infrastructure to manage (no subnets, route tables, security groups)
+- **Equivalent Security**: TLS 1.2+ encryption + IPsec VPN + IAM roles + KMS encryption
+
 ### Security
 - **Data Residency**: All data in Australia (ap-southeast-2, ap-southeast-4)
-- **Encryption**: At rest (DynamoDB, S3 with KMS) and in transit (TLS 1.2+)
+- **Encryption at Rest**: DynamoDB, S3 with KMS
+- **Encryption in Transit**: TLS 1.2+ for AWS services, IPsec VPN for Direct Connect
 - **Authentication**: Cognito with SAML 2.0, support for external IdPs
 - **Authorization**: Role-based access control (RBAC) with ACLs stored in DynamoDB
 - **Audit**: All document operations logged to DynamoDB with TTL (6mo prod, 1mo UAT, 1wk dev)
@@ -468,7 +476,7 @@ new cloudwatch.Alarm(this, 'HighErrorRate', {
 
 ## Common Pitfalls to Avoid
 
-1. **Lambda Cold Starts**: Use provisioned concurrency for latency-sensitive functions
+1. **Lambda Cold Starts**: Use provisioned concurrency for latency-sensitive functions (non-VPC Lambdas have faster cold starts ~200-500ms)
 2. **DynamoDB Hot Partitions**: Design partition keys with high cardinality (tenant_id + random suffix)
 3. **Timeout Cascades**: Set Lambda timeout < API Gateway timeout (29s max)
 4. **CORS Issues**: Configure API Gateway CORS properly for Angular app
@@ -476,6 +484,7 @@ new cloudwatch.Alarm(this, 'HighErrorRate', {
 6. **Hardcoded Tenant IDs**: Always extract dynamically from request context
 7. **Missing Authorization Checks**: Every Lambda must validate tenant + user access
 8. **Unencrypted Secrets**: Use Secrets Manager, never environment variables for sensitive data
+9. **DO NOT add Lambda to VPC**: Architecture uses non-VPC Lambdas per ADR-012 (cost, performance, simplicity)
 
 ## References
 

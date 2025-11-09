@@ -530,6 +530,106 @@ Need to:
 
 ---
 
+## ADR-012: Lambda Deployment - VPC vs Non-VPC
+
+**Status:** Accepted
+**Date:** 2025-11-09
+**Deciders:** Architecture Team, Network Team, Security Team
+
+### Context
+
+Lambda functions need to:
+- Connect to AWS managed services (DynamoDB, S3, Secrets Manager, Cognito)
+- Connect to on-premise systems (IES, CMOD, FRS) via Direct Connect (10Gbps)
+- Meet security and compliance requirements (Australian Privacy Act, data residency)
+
+We need to choose between:
+- **Option 1**: Lambda WITHOUT VPC (public IPs, TLS + IPsec encryption)
+- **Option 2**: Lambda IN VPC (private IPs, NAT Gateway, VPC Endpoints)
+
+### Decision
+
+**Deploy Lambda functions WITHOUT VPC** (Option 1), using public IP connectivity with TLS 1.2+ encryption and IPsec VPN over Direct Connect.
+
+### Rationale
+
+1. **Cost Savings**: Avoid NAT Gateway costs ($135/month for 3 AZs) and VPC Endpoint costs (~$21/month)
+   - Total savings: **$156/month ($1,872/year)**
+
+2. **Performance**: No Lambda cold start penalty
+   - VPC Lambda adds ~2 seconds to cold starts (ENI creation/attachment)
+   - Non-VPC Lambda starts in ~200-500ms
+
+3. **Security is Equivalent**:
+   - **Encryption in Transit**: TLS 1.2+ (HTTPS) + IPsec VPN over Direct Connect
+   - **Encryption at Rest**: KMS for DynamoDB, S3, Secrets Manager
+   - **Authentication**: Cognito JWT validation at API Gateway
+   - **Authorization**: IAM execution roles with least privilege
+   - **Data Residency**: All data in ap-southeast-2 / ap-southeast-4 (region selection, not VPC)
+
+4. **AWS Managed Services Don't Require VPC**:
+   - DynamoDB, S3, Secrets Manager, Cognito, API Gateway are accessible via public endpoints
+   - AWS IAM provides access control (no network segmentation needed)
+   - Multi-tenancy security is **logical isolation** (tenant_id), not network isolation
+
+5. **Direct Connect Supports Public IPs**:
+   - Confirmed with Network Team: Direct Connect can route to AWS public IPs
+   - Traffic encrypted with IPsec VPN tunnel
+   - No requirement for private IP ranges from on-premise side
+
+6. **Simpler Architecture**:
+   - No subnets, route tables, security groups, NAT Gateways to manage
+   - Easier debugging (no VPC flow logs, no NAT troubleshooting)
+   - Faster deployments (no VPC resource creation delays)
+
+### Consequences
+
+**Positive:**
+- **$1,872/year cost savings** (NAT + VPC Endpoints)
+- **Faster Lambda cold starts** (~2s faster)
+- **Simpler operations** (no VPC management)
+- **Easier troubleshooting** (no NAT Gateway failures, no ENI limits)
+- **Faster deployments** (no VPC dependencies)
+
+**Negative:**
+- Lambda uses **public IPs** (mitigated: traffic still encrypted via TLS + IPsec)
+- Cannot access resources requiring **private connectivity** (not applicable - no RDS, ElastiCache, or private IES/CMOD endpoints)
+- If on-premise network policy changes to require private IPs, migration to VPC would be needed (rare scenario)
+
+### Alternatives Considered
+
+1. **Lambda in VPC with NAT Gateway**:
+   - **Pros**: Private IP connectivity, perceived as "more secure"
+   - **Cons**: $156/month extra cost, slower cold starts, operational complexity
+   - **Verdict**: Not needed - security is equivalent with TLS + IPsec
+
+2. **Lambda in VPC with VPC Endpoints (no NAT)**:
+   - **Pros**: Private connectivity to DynamoDB/S3, no NAT cost
+   - **Cons**: Still requires NAT for on-premise connectivity (IES/CMOD/FRS), VPC endpoint costs, cold start penalty
+   - **Verdict**: Doesn't solve Direct Connect connectivity, still incurs costs
+
+3. **Hybrid (some Lambdas in VPC, some not)**:
+   - **Pros**: Only put archive-integration Lambdas in VPC
+   - **Cons**: Operational complexity, inconsistent architecture
+   - **Verdict**: Unnecessary complexity for no security gain
+
+### Implementation Notes
+
+- **Direct Connect Configuration**: Public VIF (Virtual Interface) routing to AWS public IP ranges
+- **Encryption**: TLS 1.2+ for all HTTPS traffic, IPsec VPN tunnel for Direct Connect
+- **IAM Policies**: Restrict Lambda execution roles to specific DynamoDB tables, S3 buckets, Secrets
+- **Security Groups**: Not applicable (no VPC)
+- **Monitoring**: CloudWatch Logs, X-Ray tracing (same as VPC Lambda)
+
+### Re-evaluation Criteria
+
+Re-evaluate this decision if:
+1. On-premise network team mandates private IP connectivity (policy change)
+2. Compliance audit requires network-level isolation (unlikely for serverless)
+3. Need to access VPC-only resources (RDS, ElastiCache) - not in current architecture
+
+---
+
 ## Summary of Decisions
 
 | ADR | Decision | Status |
@@ -545,6 +645,7 @@ Need to:
 | ADR-009 | REST API | Accepted |
 | ADR-010 | Blue-Green with Canary Rollout | Accepted |
 | ADR-011 | CloudWatch + X-Ray | Accepted |
+| ADR-012 | Lambda WITHOUT VPC | Accepted |
 
 ---
 

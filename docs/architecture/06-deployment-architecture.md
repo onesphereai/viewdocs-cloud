@@ -933,17 +933,17 @@ pipeline {
 **Dev Agent** (jenkins-dev-agent):
 - AWS credentials for dev account (123456789012)
 - Node.js, npm, AWS CLI, CDK CLI installed
-- Access to dev VPC (if Lambda requires VPC)
+- No VPC required (Lambda deployed without VPC per ADR-012)
 
 **UAT Agent** (jenkins-uat-agent):
 - AWS credentials for UAT account (234567890123)
 - Node.js, npm, AWS CLI, CDK CLI installed
-- Access to UAT VPC
+- No VPC required (Lambda deployed without VPC per ADR-012)
 
 **Prod Agent** (jenkins-prod-agent):
 - AWS credentials for production account (345678901234)
 - Node.js, npm, AWS CLI, CDK CLI installed
-- Access to production VPC
+- No VPC required (Lambda deployed without VPC per ADR-012)
 - Restricted access (only authorized personnel)
 
 **Master Agent**:

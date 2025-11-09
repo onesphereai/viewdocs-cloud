@@ -335,22 +335,17 @@ graph TB
 
 ## 5. Network Topology
 
-### 5.1 On-Premise Connectivity
+### 5.1 On-Premise Connectivity (Non-VPC Architecture)
 
 ```mermaid
 graph LR
     subgraph "AWS - ap-southeast-2"
-        subgraph "VPC (Optional)"
-            PrivateSubnet[Private Subnet<br/>Lambda ENI]
-            NAT[NAT Gateway<br/>Public Subnet]
-        end
-
-        Lambda[Lambda Functions]
-        DXGateway[Direct Connect Gateway]
+        Lambda[Lambda Functions<br/>No VPC]
+        DXGateway[Direct Connect Gateway<br/>Public VIF]
     end
 
     subgraph "AWS Direct Connect Location"
-        DXConnection[Direct Connect<br/>10Gbps Connection]
+        DXConnection[Direct Connect<br/>10Gbps Connection<br/>IPsec VPN Tunnel]
     end
 
     subgraph "On-Premise Data Center"
@@ -362,12 +357,8 @@ graph LR
         HUB[HUB<br/>IBM MQ]
     end
 
-    Lambda -->|If VPC Lambda| PrivateSubnet
-    PrivateSubnet --> NAT
-    NAT --> DXGateway
-    Lambda -->|Direct (no VPC)| DXGateway
-
-    DXGateway --> DXConnection
+    Lambda -->|Public IP<br/>TLS 1.2+ HTTPS| DXGateway
+    DXGateway -->|IPsec Encrypted| DXConnection
     DXConnection --> Router
     Router --> Firewall
     Firewall --> IES
@@ -379,12 +370,19 @@ graph LR
     style Lambda fill:#4ECDC4
 ```
 
-**Connectivity Options**:
+**Architecture Decision** (ADR-012):
 
-| Option | Pros | Cons | Recommendation |
-|--------|------|------|----------------|
-| **Lambda in VPC** | Private IP connectivity, enhanced security | NAT costs ($45/AZ/month), cold start penalty (+2s) | Use if required by on-premise network policies |
-| **Lambda without VPC** | No NAT costs, faster cold starts | Public IP connectivity (still encrypted via TLS/IPsec) | **Recommended** if Direct Connect supports public IPs |
+**Lambda WITHOUT VPC** - Adopted for cost savings, performance, and simplicity.
+
+| Aspect | Non-VPC (Adopted) |
+|--------|-------------------|
+| **Connectivity** | Public IPs to AWS services and Direct Connect |
+| **Encryption** | TLS 1.2+ (HTTPS) + IPsec VPN over Direct Connect |
+| **Cost** | $0 (no NAT Gateway, no VPC Endpoints) |
+| **Cold Start** | ~200-500ms (fast) |
+| **Security** | Equivalent - TLS + IPsec + IAM + KMS |
+| **Operational Complexity** | Low (no VPC management) |
+| **Annual Savings** | **$1,872/year** vs VPC approach |
 
 ---
 

@@ -344,6 +344,26 @@ Total WAF: $16/month
 
 **Potential Savings**: $50-100/month
 
+### 4.6 VPC Cost Avoidance (ADR-012)
+
+**Architecture Decision**: Lambda WITHOUT VPC
+
+| Item | VPC Cost (Avoided) | Non-VPC Cost | Annual Savings |
+|------|-------------------|--------------|----------------|
+| **NAT Gateway** (3 AZs) | $45/AZ × 3 = $135/month | $0 | $1,620/year |
+| **NAT Gateway Data Processing** | ~$10/month | $0 | $120/year |
+| **VPC Endpoints** (DynamoDB, S3, Secrets) | ~$21/month | $0 | $252/year |
+| **Total** | **$166/month** | **$0** | **$1,992/year** |
+
+**Rationale**:
+- Lambda functions connect to AWS services via public endpoints (TLS 1.2+)
+- Direct Connect uses public VIF with IPsec VPN tunnel (encrypted)
+- Security is equivalent to VPC (TLS + IPsec + IAM + KMS)
+- Performance is better (no VPC cold start penalty)
+- Operations are simpler (no VPC management)
+
+See [ADR-012](10-decision-log.md#adr-012-lambda-deployment---vpc-vs-non-vpc) for detailed analysis.
+
 ---
 
 ## 5. Cost Allocation & Tagging

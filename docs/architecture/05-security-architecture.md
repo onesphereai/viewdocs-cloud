@@ -257,7 +257,6 @@ const result = await dynamoDb.get({
 | **S3** | AES-256 | Customer-managed KMS key (`viewdocs-s3-key`) |
 | **Secrets Manager** | AES-256 | AWS-managed KMS key (`aws/secretsmanager`) |
 | **CloudWatch Logs** | AES-256 | AWS-managed KMS key (`aws/logs`) |
-| **EBS (if using VPC Lambda)** | AES-256 | AWS-managed KMS key (`aws/ebs`) |
 
 **KMS Key Policy** (customer-managed S3 key):
 ```json
@@ -312,23 +311,16 @@ graph TB
     end
 
     subgraph "AWS - ap-southeast-2"
-        subgraph "Public Subnet"
-            APIGW[API Gateway<br/>Regional Endpoint]
-            NAT[NAT Gateway]
-        end
-
-        subgraph "Private Subnet (Optional)"
-            Lambda[Lambda Functions<br/>in VPC]
-        end
-
-        DDB[DynamoDB<br/>VPC Endpoint]
-        S3[S3<br/>VPC Endpoint]
-        Secrets[Secrets Manager<br/>VPC Endpoint]
+        APIGW[API Gateway<br/>Regional Endpoint]
+        Lambda[Lambda Functions<br/>No VPC]
+        DDB[DynamoDB<br/>Public Endpoint]
+        S3[S3<br/>Public Endpoint]
+        Secrets[Secrets Manager<br/>Public Endpoint]
+        DXGateway[Direct Connect Gateway<br/>Public VIF]
     end
 
     subgraph "On-Premise via Direct Connect"
-        DX[Direct Connect<br/>10Gbps]
-        VPN[VPN Tunnel<br/>IPsec]
+        DX[Direct Connect<br/>10Gbps<br/>IPsec VPN Tunnel]
         IES[IES]
         CMOD[CMOD]
         FRS[FRS Proxy]
@@ -342,37 +334,40 @@ graph TB
     Lambda --> S3
     Lambda --> Secrets
 
-    Lambda -.->|Via NAT| DX
-    DX --> VPN
-    VPN --> IES
-    VPN --> CMOD
-    VPN --> FRS
+    Lambda -->|TLS 1.2+<br/>Public IP| DXGateway
+    DXGateway -->|IPsec Encrypted| DX
+    DX --> IES
+    DX --> CMOD
+    DX --> FRS
 
     style WAF fill:#FF6B6B
     style Lambda fill:#4ECDC4
 ```
 
-### 5.2 VPC Configuration (Optional)
+### 5.2 Non-VPC Architecture (ADR-012)
 
-**When to use VPC for Lambda?**
-- ✅ If Direct Connect requires private IP ranges
-- ❌ If Direct Connect supports public IPs (simpler, no NAT costs)
+**Decision**: Lambda functions deployed **WITHOUT VPC** for cost savings, performance, and simplicity.
 
-**VPC Setup** (if required):
-- **CIDR**: 10.0.0.0/16
-- **Subnets**:
-  - Private Subnet 1: 10.0.1.0/24 (ap-southeast-2a)
-  - Private Subnet 2: 10.0.2.0/24 (ap-southeast-2b)
-  - Public Subnet: 10.0.100.0/24 (NAT Gateway)
-- **VPC Endpoints**: DynamoDB, S3, Secrets Manager (no internet egress charges)
+**Architecture Benefits**:
+- ✅ **No VPC costs**: $0 (vs $156/month for NAT + VPC Endpoints)
+- ✅ **Faster cold starts**: ~200-500ms (vs ~2-3s with VPC ENI attachment)
+- ✅ **Simpler operations**: No subnets, route tables, security groups, NAT Gateways
+- ✅ **Equivalent security**: TLS 1.2+ encryption + IPsec VPN + IAM + KMS
 
-**Security Groups**:
-- Lambda Security Group: Allow outbound to 0.0.0.0/0 (HTTPS), inbound from VPC only
+**Security Controls** (Non-VPC):
+- **Encryption in Transit**: TLS 1.2+ for all HTTPS traffic to AWS services
+- **Direct Connect**: Public VIF with IPsec VPN tunnel to on-premise systems
+- **IAM Execution Roles**: Least privilege access to DynamoDB, S3, Secrets Manager
+- **No Public Internet**: Lambda cannot receive inbound connections (API Gateway only)
+- **Data Residency**: All data in ap-southeast-2 / ap-southeast-4 (region selection)
 
-**Trade-offs**:
-- ✅ Private connectivity to on-premise
-- ❌ NAT Gateway costs (~$45/month per AZ)
-- ❌ Lambda cold starts +2-3 seconds (ENI attachment)
+**Why VPC is NOT needed**:
+1. **Multi-tenancy security is logical** (tenant_id partition keys), not network-based
+2. **AWS managed services** (DynamoDB, S3, Secrets) don't require VPC
+3. **Direct Connect** supports public IP routing with IPsec encryption
+4. **No private resources** (no RDS, ElastiCache, or private endpoints required)
+
+See [ADR-012](10-decision-log.md#adr-012-lambda-deployment---vpc-vs-non-vpc) for detailed rationale.
 
 ### 5.3 AWS WAF Rules
 
