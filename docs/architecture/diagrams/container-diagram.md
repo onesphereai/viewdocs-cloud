@@ -26,6 +26,7 @@ C4Container
         Container(commentService, "Comment Service", "Node.js Lambda", "Manages document comments and history")
         Container(adminService, "Admin Service", "Node.js Lambda", "Tenant and user management")
         Container(eventService, "Event Service", "Node.js Lambda", "Publishes events to HUB via FRS")
+        Container(mailroomWrapper, "MailRoom Wrapper", "Node.js Lambda", "Facade/BFF for MailRoom backend, handles auth and translation")
 
         Container(stepFunctions, "Bulk Download Workflow", "AWS Step Functions", "Orchestrates async bulk downloads")
         Container(eventBridge, "Event Bus", "AWS EventBridge", "Centralized event routing")
@@ -43,6 +44,7 @@ C4Container
     System_Ext(cmod, "CMOD", "On-prem Archive (SOAP)")
     System_Ext(frs, "FRS Proxy", "Event forwarding (SOAP)")
     System_Ext(email, "Email Service", "IDM Email Service")
+    System_Ext(mailroomBackend, "MailRoom Backend", "Independent microservice (Lambda/ECS)")
 
     Rel(user, cdn, "Accesses web app", "HTTPS")
     Rel(cdn, s3Frontend, "Serves static files", "HTTPS")
@@ -57,6 +59,7 @@ C4Container
     Rel(apiGateway, downloadService, "Invokes", "Sync")
     Rel(apiGateway, commentService, "Invokes", "Sync")
     Rel(apiGateway, adminService, "Invokes", "Sync")
+    Rel(apiGateway, mailroomWrapper, "Invokes", "Sync")
 
     Rel(docService, dynamoDB, "Reads ACLs, writes audit logs", "AWS SDK")
     Rel(docService, secrets, "Fetches archive credentials", "AWS SDK")
@@ -83,6 +86,9 @@ C4Container
 
     Rel(eventBridge, eventService, "Triggers on events", "Event")
     Rel(eventService, frs, "Forwards events", "SOAP / Direct Connect")
+
+    Rel(mailroomWrapper, dynamoDB, "Reads ACLs, writes audit logs", "AWS SDK")
+    Rel(mailroomWrapper, mailroomBackend, "Calls MailRoom API", "HTTPS / REST")
 
     UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="1")
 ```
@@ -116,6 +122,7 @@ C4Container
 | **Comment Service** | Node.js 20.x Lambda | 10s | 256MB | 50 | CRUD operations for comments, version history |
 | **Admin Service** | Node.js 20.x Lambda | 15s | 512MB | 10 | Tenant onboarding, user management, ACL configuration |
 | **Event Service** | Node.js 20.x Lambda | 5s | 256MB | 50 | Transform events and forward to FRS Proxy |
+| **MailRoom Wrapper** | Node.js 20.x Lambda | 29s | 512MB | 50 | BFF/Facade for MailRoom backend, enforces Viewdocs ACLs, translates API formats |
 
 ### Orchestration Containers
 

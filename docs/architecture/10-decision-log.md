@@ -630,6 +630,283 @@ Re-evaluate this decision if:
 
 ---
 
+## ADR-013: MailRoom Integration - Backend-Only Platform with Viewdocs UI Wrapper
+
+**Status:** Accepted
+**Date:** 2025-11-10
+**Deciders:** Architecture Team, Product Team
+
+### Context
+
+We are building two new platforms simultaneously:
+- **Viewdocs**: Document management and viewing platform
+- **MailRoom**: Mail/correspondence management platform (NEW)
+
+**Requirements**:
+1. MailRoom UI will be part of the Viewdocs UI (unified user experience)
+2. MailRoom backend should remain independent and reusable
+3. Other clients (future mobile apps, API consumers) should be able to consume MailRoom services
+4. Both platforms should be able to evolve independently
+5. Single authentication/authorization model (Cognito + Viewdocs ACLs)
+
+**Decision Needed**: How should MailRoom be architected in relation to Viewdocs?
+
+**Options**:
+- **Option 1**: MailRoom as backend-only platform with Viewdocs wrapper services
+- **Option 2**: MailRoom as full-stack platform with separate UI
+- **Option 3**: MailRoom fully integrated into Viewdocs codebase
+
+### Decision
+
+**Adopt Option 1: MailRoom as Backend-Only Platform with Viewdocs Wrapper Services**
+
+**Architecture**:
+```
+┌───────────────────────────────────────────┐
+│       Viewdocs UI (Angular 17+)           │
+│  ┌─────────────────────────────────────┐  │
+│  │ Viewdocs Components                 │  │
+│  │  - Document Viewer                  │  │
+│  │  - Search                           │  │
+│  │  - Comments                         │  │
+│  └─────────────────────────────────────┘  │
+│  ┌─────────────────────────────────────┐  │
+│  │ MailRoom UI Components (integrated) │  │
+│  │  - Mail List                        │  │
+│  │  - Mail Viewer                      │  │
+│  │  - Mail Actions (archive, forward)  │  │
+│  └─────────────────────────────────────┘  │
+└───────────────┬───────────────────────────┘
+                │ Single API Gateway
+    ┌───────────┼────────────────┐
+    │           │                │
+┌───▼───────┐ ┌─▼──────────────┐ ┌─▼────────┐
+│ Document  │ │ MailRoom       │ │ Search   │
+│ Service   │ │ Wrapper Service│ │ Service  │
+│ (Lambda)  │ │ (Lambda) ←NEW  │ │ (Lambda) │
+└───────────┘ └────────┬───────┘ └──────────┘
+                       │
+              ┌────────▼──────────────────┐
+              │ MailRoom Backend API      │
+              │ (Independent Microservice)│
+              │  - Lambda/ECS             │
+              │  - Own database           │
+              │  - Reusable by others     │
+              └───────────────────────────┘
+```
+
+### Rationale
+
+1. **Unified User Experience**:
+   - Users see MailRoom as part of Viewdocs (single Angular app)
+   - Single login, single navigation, consistent UI/UX
+   - No context switching between applications
+
+2. **MailRoom Independence**:
+   - MailRoom backend can be consumed by other clients (future mobile app, third-party integrations)
+   - MailRoom can be deployed/scaled independently from Viewdocs
+   - MailRoom team can work independently on backend features
+
+3. **Separation of Concerns**:
+   - **Viewdocs** owns: Authentication, Authorization, UI, Tenant Management
+   - **MailRoom** owns: Mail processing business logic, Mail storage, Mail workflows
+   - **Wrapper** owns: Protocol translation, ACL enforcement, Audit logging
+
+4. **Backend for Frontend (BFF) Pattern**:
+   - Wrapper provides Viewdocs-specific API optimized for UI needs
+   - Hides MailRoom backend complexity
+   - Allows MailRoom backend API to evolve without breaking Viewdocs UI
+
+5. **Technology Consistency**:
+   - Both platforms use same tech stack (TypeScript, Lambda, DynamoDB)
+   - Shared CDK infrastructure code
+   - Same CI/CD pipeline (Bitbucket + Jenkins)
+   - Same monitoring (CloudWatch + X-Ray)
+
+6. **Cost Efficiency**:
+   - Shared infrastructure (API Gateway, CloudFront, Cognito)
+   - No duplicate authentication/authorization services
+   - Single deployment pipeline
+
+### Consequences
+
+**Positive:**
+- ✅ **Unified UX** - Users perceive single platform
+- ✅ **MailRoom reusability** - Can be consumed by other clients
+- ✅ **Independent evolution** - Teams can work in parallel
+- ✅ **Clear boundaries** - Well-defined service contracts
+- ✅ **Shared auth** - Single Cognito + ACL model
+- ✅ **Consistent tech stack** - TypeScript, Lambda, DynamoDB
+- ✅ **Simplified deployment** - Single Viewdocs UI deployment
+- ✅ **Future-proof** - Easy to extract MailRoom if needed
+
+**Negative:**
+- ❌ **Wrapper complexity** - Additional translation layer
+- ❌ **Coordination required** - API contract between wrapper and MailRoom
+- ❌ **Slight latency** - Extra hop through wrapper (~50-100ms)
+
+**Mitigations:**
+- Wrapper is thin translation layer, minimal logic
+- Use OpenAPI/Swagger for contract definition
+- Async pattern for heavy operations (no latency impact)
+
+### Implementation Design
+
+#### MailRoom Wrapper Service Responsibilities:
+
+1. **Authentication**: Inherit from API Gateway (Cognito JWT already validated)
+2. **Authorization**: Check Viewdocs ACLs (tenant_id + user roles)
+3. **Tenant Isolation**: Inject `tenant_id` into every MailRoom call
+4. **Request Translation**: Map Viewdocs API format → MailRoom API format
+5. **Response Translation**: Map MailRoom response → Viewdocs UI format
+6. **Error Handling**: Translate MailRoom errors to Viewdocs error codes
+7. **Audit Logging**: Log mail operations to Viewdocs audit table
+8. **Circuit Breaker**: Handle MailRoom downtime gracefully
+
+#### API Structure:
+
+**Viewdocs MailRoom Wrapper API** (exposed to Angular UI):
+```
+# Mail Items
+GET    /api/v1/{tenantId}/mailroom/items
+POST   /api/v1/{tenantId}/mailroom/items/search
+GET    /api/v1/{tenantId}/mailroom/items/{itemId}
+
+# Mail Actions
+POST   /api/v1/{tenantId}/mailroom/items/{itemId}/actions/archive
+POST   /api/v1/{tenantId}/mailroom/items/{itemId}/actions/forward
+POST   /api/v1/{tenantId}/mailroom/items/{itemId}/actions/annotate
+
+# Bulk Operations (async)
+POST   /api/v1/{tenantId}/mailroom/bulk-operations
+GET    /api/v1/{tenantId}/mailroom/bulk-operations/{jobId}/status
+```
+
+**MailRoom Backend API** (internal, called by wrapper):
+```
+POST   https://mailroom-api.internal/v1/search
+GET    https://mailroom-api.internal/v1/items/{itemId}
+POST   https://mailroom-api.internal/v1/items/{itemId}/archive
+POST   https://mailroom-api.internal/v1/items/{itemId}/forward
+POST   https://mailroom-api.internal/v1/bulk-operations
+```
+
+#### Integration Patterns:
+
+**Synchronous (Request-Response)**: For quick operations (<2s)
+- Get mail items (list view)
+- Search mail
+- Get item details
+- Simple actions (mark as read)
+
+**Asynchronous (Event-Driven)**: For heavy operations (>2s)
+- Bulk archive (100+ items)
+- Bulk forwarding
+- OCR processing
+- Email generation
+
+**Async Flow**:
+```
+Viewdocs Wrapper → SQS Queue → MailRoom Worker Lambda
+MailRoom Worker → EventBridge (MailRoomJobCompleted event)
+EventBridge → Viewdocs Notification Lambda → WebSocket/Email
+```
+
+#### Database Design:
+
+**MailRoom owns its own data**:
+- MailRoom has separate DynamoDB tables (or own database)
+- Viewdocs does NOT query MailRoom tables directly
+- All access via MailRoom API
+
+**Viewdocs stores references**:
+- Viewdocs audit table logs mail operations (metadata only)
+- Viewdocs ACL table controls who can access MailRoom features
+
+### Alternatives Considered
+
+#### 1. **Full-Stack MailRoom with Separate UI (Option 2)**:
+
+**Approach**: MailRoom has its own Angular app, separate deployment
+
+**Pros**:
+- Complete independence
+- No wrapper needed
+
+**Cons**:
+- ❌ **Fragmented UX** - Users switch between apps
+- ❌ **Duplicate auth** - Need separate login or SSO
+- ❌ **Higher cost** - Duplicate CloudFront, API Gateway
+- ❌ **Maintenance overhead** - Two Angular apps to maintain
+
+**Verdict**: Not recommended - violates unified UX requirement
+
+#### 2. **Fully Integrated MailRoom (Option 3)**:
+
+**Approach**: Merge MailRoom code into Viewdocs monolith
+
+**Pros**:
+- Simplest architecture
+- No integration complexity
+
+**Cons**:
+- ❌ **MailRoom NOT reusable** - Cannot be consumed by other clients
+- ❌ **Tight coupling** - Hard to separate later
+- ❌ **Deployment coupling** - Single deployment for both
+- ❌ **Team boundaries blur** - Harder to parallelize work
+
+**Verdict**: Not recommended - violates reusability requirement
+
+### Technology Stack for MailRoom Backend
+
+| Component | Technology | Rationale |
+|-----------|------------|-----------|
+| **Runtime** | Node.js 20.x Lambda | Consistent with Viewdocs |
+| **Language** | TypeScript | Consistent with Viewdocs |
+| **Database** | DynamoDB | Serverless, consistent with Viewdocs |
+| **API** | REST (API Gateway) | Consistent with Viewdocs |
+| **Queue** | SQS | For async operations |
+| **Events** | EventBridge | For notifications |
+| **Storage** | S3 | For mail attachments |
+| **Secrets** | Secrets Manager | For external integrations |
+
+### Deployment Strategy
+
+**MailRoom Backend**:
+- Deployed via same CDK infrastructure as Viewdocs
+- Separate CDK stack: `MailRoomBackendStack`
+- Same CI/CD pipeline (Bitbucket → Jenkins)
+- Independent versioning (`mailroom-v1.0.0`)
+
+**Viewdocs MailRoom Wrapper**:
+- Part of Viewdocs CDK stack: `ApiStack`
+- Deployed together with other Viewdocs services
+- Shares API Gateway with Viewdocs endpoints
+
+**Viewdocs UI (with MailRoom components)**:
+- Single Angular app deployment
+- MailRoom UI components in `/src/app/mailroom/` module
+- Lazy-loaded for performance
+
+### Re-evaluation Criteria
+
+Re-evaluate this decision if:
+1. MailRoom needs to be a standalone product (separate pricing, licensing)
+2. Performance requirements exceed wrapper overhead (latency >200ms p95)
+3. Other clients don't materialize within 12 months (MailRoom only used by Viewdocs)
+4. Significant API contract friction between wrapper and MailRoom backend
+
+### Related ADRs
+
+- **ADR-001**: Pool Multi-Tenancy - MailRoom follows same tenant isolation model
+- **ADR-002**: Cognito Auth - MailRoom uses same Cognito User Pool
+- **ADR-003**: DynamoDB - MailRoom uses DynamoDB for data storage
+- **ADR-004**: Sync/Async - Applies to MailRoom operations
+- **ADR-005**: EventBridge - Used for MailRoom async workflows
+- **ADR-012**: Non-VPC Lambda - MailRoom Lambda also without VPC
+
+---
+
 ## Summary of Decisions
 
 | ADR | Decision | Status |
@@ -646,6 +923,7 @@ Re-evaluate this decision if:
 | ADR-010 | Blue-Green with Canary Rollout | Accepted |
 | ADR-011 | CloudWatch + X-Ray | Accepted |
 | ADR-012 | Lambda WITHOUT VPC | Accepted |
+| ADR-013 | MailRoom Backend-Only + Wrapper | Accepted |
 
 ---
 
