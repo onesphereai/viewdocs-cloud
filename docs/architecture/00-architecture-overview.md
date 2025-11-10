@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-This document presents the High-Level Solution Design (HLSD) for migrating the on-premise Viewdocs document management system to a cloud-native, serverless, multi-tenant architecture on AWS. The solution leverages AWS managed services to achieve scalability, resilience, and cost-efficiency while integrating with existing on-premise systems (IES, CMOD, FRS, HUB) and cloud-based systems (IESC, IDM).
+This document presents the High-Level Solution Design (HLSD) for migrating the on-premise Viewdocs document management system to a cloud-native, serverless, multi-tenant architecture on AWS. The solution leverages AWS managed services to achieve scalability, resilience, and cost-efficiency while integrating with existing on-premise systems (IES, CMOD, FRS, HUB) and cloud-based systems (IESC, IDM, MailRoom).
 
 ### Key Highlights
 
@@ -55,8 +55,9 @@ The cloud migration aims to:
 3. **Download**: Single document download, bulk download (async, up to 5GB)
 4. **Collaboration**: Add/edit comments on documents with version history
 5. **Email Sharing**: Send documents via email
-6. **Audit & Compliance**: Comprehensive logging with configurable retention
-7. **Multi-Tenancy**: Isolated data and configuration per client organization
+6. **Document Routing & Assignment**: MailRoom integration for workflow, task assignment, and document distribution via unified UI
+7. **Audit & Compliance**: Comprehensive logging with configurable retention
+8. **Multi-Tenancy**: Isolated data and configuration per client organization
 
 ---
 
@@ -114,6 +115,10 @@ graph TB
         IESC[IESC<br/>Cloud Archive]
     end
 
+    subgraph "AWS Cloud - Platform Services"
+        MR[MailRoom Backend<br/>Document Routing & Assignment]
+    end
+
     subgraph "On-Premise via Direct Connect"
         IES[IES<br/>On-Prem Archive]
         CMOD[CMOD<br/>IBM Archive]
@@ -137,9 +142,11 @@ graph TB
     VD -->|SOAP API<br/>Direct Connect| IES
     VD -->|SOAP API<br/>Direct Connect| CMOD
     VD -->|SOAP API<br/>Direct Connect| FRS
+    VD -->|REST API<br/>Internal| MR
     FRS -->|IBM MQ| HUB
 
     style VD fill:#FF6B6B,stroke:#C92A2A,stroke-width:3px
+    style MR fill:#FFD93D,stroke:#F4A300,stroke-width:2px
     style IESC fill:#4ECDC4,stroke:#0A6C74
     style IES fill:#95E1D3,stroke:#38A89D
     style CMOD fill:#95E1D3,stroke:#38A89D
@@ -177,6 +184,7 @@ graph TB
         LambdaDownload[Lambda: Download Service]
         LambdaComment[Lambda: Comment Service]
         LambdaEvent[Lambda: Event Service]
+        LambdaMR[Lambda: MailRoom Wrapper]
     end
 
     subgraph "AWS - Orchestration"
@@ -208,12 +216,16 @@ graph TB
     APIGW --> LambdaAuth
     APIGW --> LambdaDownload
     APIGW --> LambdaComment
+    APIGW --> LambdaMR
 
     LambdaDoc --> DDB
     LambdaDoc --> IESC[IESC REST API]
     LambdaDoc --> IES[IES SOAP API]
     LambdaDoc --> CMOD[CMOD SOAP API]
     LambdaDoc --> EB
+
+    LambdaMR --> DDB
+    LambdaMR --> MRBackend[MailRoom Backend API]
 
     LambdaDownload --> SF
     SF --> SQS
@@ -387,7 +399,21 @@ See [10-decision-log.md#ADR-005](10-decision-log.md#adr-005).
 | **IDM** | Identity Provider | SAML 2.0 | Cognito SAML federation |
 | **IDM Email Service** | Send emails | REST/SOAP | Lambda → IDM Email Service |
 
-### 6.3 Future Integrations
+### 6.3 MailRoom Integration
+
+| Component | Purpose | Interface | Integration Pattern |
+|-----------|---------|-----------|---------------------|
+| **MailRoom Backend** | Document routing and assignment system | REST API | Independent microservice (Lambda/ECS) with own database |
+| **MailRoom Wrapper Service** | BFF/Facade for MailRoom | REST API | Lambda wrapper enforces Viewdocs ACLs, translates API formats |
+| **MailRoom UI Components** | Routing, assignment, workflow UI | Angular 17+ | Integrated into Viewdocs Angular app (unified UX) |
+
+**Integration Pattern:** Backend for Frontend (BFF) + Anti-Corruption Layer
+- Viewdocs UI includes MailRoom UI components (single application)
+- MailRoom Wrapper Service handles authentication, authorization, tenant isolation
+- MailRoom Backend remains independent and reusable by other clients
+- Both platforms share same technology stack (TypeScript, Node.js, DynamoDB)
+
+### 6.4 Future Integrations
 
 | System | Timeline | Purpose |
 |--------|----------|---------|

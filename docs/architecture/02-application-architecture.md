@@ -29,6 +29,7 @@ graph TB
         AdminSvc[Admin Service]
         AuthSvc[Auth Service]
         EventSvc[Event Service]
+        MailRoomSvc[MailRoom Wrapper Service]
     end
 
     subgraph "Integration Layer"
@@ -38,6 +39,7 @@ graph TB
         CMODClient[CMOD Client]
         FRSClient[FRS Proxy Client]
         EmailClient[Email Client]
+        MailRoomClient[MailRoom Backend Client]
     end
 
     subgraph "Data Layer"
@@ -54,6 +56,7 @@ graph TB
     APIGW --> CommentSvc
     APIGW --> AdminSvc
     APIGW --> AuthSvc
+    APIGW --> MailRoomSvc
 
     DocSvc --> ArchiveAdapter
     SearchSvc --> ArchiveAdapter
@@ -67,6 +70,9 @@ graph TB
     EventSvc --> FRSClient
     DownloadSvc --> EmailClient
 
+    MailRoomSvc --> MailRoomClient
+    MailRoomSvc --> DDB
+
     DocSvc --> DDB
     CommentSvc --> DDB
     AdminSvc --> DDB
@@ -77,6 +83,7 @@ graph TB
     style DocSvc fill:#FF6B6B
     style SearchSvc fill:#FF6B6B
     style DownloadSvc fill:#FF6B6B
+    style MailRoomSvc fill:#FFD93D
 ```
 
 ---
@@ -220,6 +227,45 @@ graph TB
 **Implementation:** TypeScript Lambda function (triggered by EventBridge rule)
 **Timeout:** 5 seconds
 **Memory:** 256MB
+
+### 2.8 MailRoom Wrapper Service
+
+**Responsibility:** Backend for Frontend (BFF) facade for MailRoom document routing and assignment system
+
+**Key Operations:**
+- `getMailItems(tenantId, userId, filters, pagination)` - List mail items for user
+- `searchMailItems(tenantId, userId, query, pagination)` - Search mail items
+- `getMailItem(tenantId, userId, itemId)` - Get mail item details
+- `archiveMailItem(tenantId, userId, itemId)` - Archive mail item
+- `forwardMailItem(tenantId, userId, itemId, recipientId)` - Forward to another user
+- `annotateMailItem(tenantId, userId, itemId, annotation)` - Add annotation
+- `initiateBulkOperation(tenantId, userId, itemIds[], operation)` - Bulk operations
+- `getBulkOperationStatus(tenantId, userId, jobId)` - Check bulk operation status
+
+**Dependencies:**
+- MailRoom Backend Client (REST API)
+- DynamoDB (Viewdocs ACLs, audit logs)
+- Cognito (JWT validation - inherited from API Gateway)
+
+**Wrapper Responsibilities:**
+1. **Authentication**: Inherit JWT validation from API Gateway
+2. **Authorization**: Enforce Viewdocs ACLs (check tenant_id + user roles)
+3. **Tenant Isolation**: Inject tenant_id into every MailRoom API call
+4. **Request Translation**: Map Viewdocs API format → MailRoom API format
+5. **Response Translation**: Map MailRoom response → Viewdocs UI format
+6. **Error Handling**: Translate MailRoom errors to Viewdocs error codes
+7. **Audit Logging**: Log mail operations to Viewdocs audit table
+8. **Circuit Breaker**: Handle MailRoom downtime gracefully
+
+**Implementation:** TypeScript Lambda function
+**Timeout:** 29 seconds
+**Memory:** 512MB
+**Concurrency:** 50
+
+**Integration Pattern:** Anti-Corruption Layer + BFF Pattern
+- MailRoom Backend remains independent with own API contracts
+- Wrapper shields Viewdocs from MailRoom API changes
+- Both platforms evolve independently
 
 ---
 
@@ -374,6 +420,39 @@ POST /acme/v1/documents/DOC123456/comments
 | POST | `/admin/users` | Create user (Client Admin) | `UserRequest` | `User` |
 | POST | `/admin/acls` | Manage folder ACLs | `ACLRequest` | `ACL` |
 | GET | `/admin/audit` | Get audit logs | Query params | `AuditLog[]` |
+
+#### 3.1.5 MailRoom Endpoints
+
+| Method | Endpoint | Description | Request | Response |
+|--------|----------|-------------|---------|----------|
+| GET | `/mailroom/items` | List mail items | Query params (filters, pagination) | `MailItemList` |
+| POST | `/mailroom/items/search` | Search mail items | `MailSearchRequest` | `MailItemList` |
+| GET | `/mailroom/items/{itemId}` | Get mail item details | - | `MailItem` |
+| POST | `/mailroom/items/{itemId}/actions/archive` | Archive mail item | - | `ActionResult` |
+| POST | `/mailroom/items/{itemId}/actions/forward` | Forward to user | `ForwardRequest` | `ActionResult` |
+| POST | `/mailroom/items/{itemId}/actions/annotate` | Add annotation | `AnnotateRequest` | `ActionResult` |
+| POST | `/mailroom/bulk-operations` | Initiate bulk operation | `BulkOperationRequest` | `JobResponse` |
+| GET | `/mailroom/bulk-operations/{jobId}/status` | Check bulk operation status | - | `JobStatus` |
+
+**Example Request: Forward Mail Item**
+```json
+POST /acme/v1/mailroom/items/MAIL-123456/actions/forward
+{
+  "recipientUserId": "user2@acme.com",
+  "note": "Please review this document and take action"
+}
+```
+
+**Example Response:**
+```json
+{
+  "success": true,
+  "itemId": "MAIL-123456",
+  "action": "forward",
+  "recipient": "user2@acme.com",
+  "timestamp": "2025-01-09T11:00:00Z"
+}
+```
 
 **Example Request: Create Tenant**
 ```json

@@ -39,6 +39,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **FRS Proxy**: SOAP API (AWS proxy to on-premise FRS/IBM MQ via Direct Connect)
 - **IDM**: SAML 2.0 IdP (AWS-hosted) + support for external IdPs
 - **Email**: IDM Email Service (current), Email Platform REST (future)
+- **MailRoom Backend**: REST API (AWS-hosted, independent document routing and assignment microservice)
 
 ## Architecture Principles
 
@@ -254,7 +255,38 @@ class IESClient implements ArchiveClient { /* SOAP */ }
 class CMODClient implements ArchiveClient { /* SOAP */ }
 ```
 
-### 3. Event-Driven Pattern
+### 3. MailRoom Integration Pattern (ADR-013)
+```typescript
+// Backend for Frontend (BFF) + Anti-Corruption Layer
+// MailRoom Wrapper Service translates between Viewdocs and MailRoom formats
+
+class MailRoomWrapperService {
+  async getMailItems(tenantId: string, userId: string, filters: any) {
+    // 1. Authorization: Check Viewdocs ACLs
+    await this.checkUserAccess(tenantId, userId);
+
+    // 2. Tenant Isolation: Inject tenant_id into MailRoom call
+    const mailroomRequest = {
+      tenant_id: tenantId,
+      filters: this.translateFilters(filters)
+    };
+
+    // 3. Call MailRoom Backend API
+    const response = await this.mailroomClient.getItems(mailroomRequest);
+
+    // 4. Response Translation: Map MailRoom format → Viewdocs format
+    return this.translateResponse(response);
+
+    // 5. Audit Logging: Log to Viewdocs audit table
+    await this.logAudit(tenantId, userId, 'MailRoom:GetItems');
+  }
+}
+
+// MailRoom UI integrated into Viewdocs Angular app (unified UX)
+// MailRoom Backend remains independent (reusable by other clients)
+```
+
+### 4. Event-Driven Pattern
 ```typescript
 // All document operations emit events to EventBridge
 await eventBridge.putEvents({
@@ -267,7 +299,7 @@ await eventBridge.putEvents({
 // EventBridge rule forwards to FRS Proxy → HUB
 ```
 
-### 4. Bulk Download Pattern
+### 5. Bulk Download Pattern
 ```typescript
 // Step Functions orchestration
 {
@@ -523,7 +555,7 @@ See [docs/architecture/10-decision-log.md](docs/architecture/10-decision-log.md)
   - 05-security-architecture.md (Auth, encryption, compliance, threat model)
   - 06-deployment-architecture.md (CI/CD, blue-green deployment)
   - 08-cost-architecture.md (Cost breakdown, optimization strategies)
-  - 10-decision-log.md (11 Architecture Decision Records)
+  - 10-decision-log.md (13 Architecture Decision Records)
 
 #### Phase 3: Diagrams & Visualizations ✅
 - **C4 Model Diagrams** (Mermaid format):
@@ -545,6 +577,8 @@ See [docs/architecture/10-decision-log.md](docs/architecture/10-decision-log.md)
 - **ADR-009**: REST API (vs GraphQL)
 - **ADR-010**: Blue-green deployment with canary rollout
 - **ADR-011**: CloudWatch + X-Ray (vs ELK/Datadog)
+- **ADR-012**: Lambda WITHOUT VPC (vs VPC) - Cost savings: $1,992/year
+- **ADR-013**: MailRoom Backend-Only Platform with Viewdocs UI Wrapper (BFF + Anti-Corruption Layer pattern)
 
 #### Phase 5: Cost Analysis ✅
 - **Production Monthly Cost**: $1,282/month (primary + DR)
