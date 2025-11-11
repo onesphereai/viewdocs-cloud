@@ -8,82 +8,117 @@
 
 ## 1. Application Components Overview
 
-### 1.1 Logical Architecture
+### 1.1 Logical Architecture (AWS Components)
 
 ```mermaid
 graph TB
     subgraph "Presentation Layer"
-        WebApp[Angular Web Application]
+        WebApp["☁️ CloudFront CDN<br/>───────────<br/>S3: Angular SPA"]
     end
 
-    subgraph "API Layer"
-        APIGW[API Gateway]
-        CogAuth[Cognito Authorizer]
+    subgraph "API & Auth Layer"
+        APIGW["🔌 API Gateway<br/>REST API"]
+        CogAuth["🔐 Cognito<br/>User Pool<br/>SAML 2.0"]
     end
 
-    subgraph "Application Services Layer"
-        DocSvc[Document Service]
-        SearchSvc[Search Service]
-        DownloadSvc[Download Service]
-        CommentSvc[Comment Service]
-        AdminSvc[Admin Service]
-        AuthSvc[Auth Service]
-        EventSvc[Event Service]
-        MailRoomSvc[MailRoom Wrapper Service]
+    subgraph "Application Services - Lambda Functions"
+        DocSvc["λ Document Service<br/>Node.js 20.x<br/>512MB | 29s"]
+        SearchSvc["λ Search Service<br/>Node.js 20.x<br/>512MB | 29s"]
+        DownloadSvc["λ Download Service<br/>Node.js 20.x<br/>256MB | 15s"]
+        CommentSvc["λ Comment Service<br/>Node.js 20.x<br/>256MB | 10s"]
+        AdminSvc["λ Admin Service<br/>Node.js 20.x<br/>512MB | 15s"]
+        AuthSvc["λ Auth Service<br/>Node.js 20.x<br/>256MB | 10s"]
+        EventSvc["λ Event Service<br/>Node.js 20.x<br/>256MB | 5s"]
+        MailRoomSvc["λ MailRoom Wrapper<br/>Node.js 20.x<br/>512MB | 29s"]
     end
 
-    subgraph "Integration Layer"
-        ArchiveAdapter[Archive Adapter]
-        IESCClient[IESC Client]
-        IESClient[IES Client]
-        CMODClient[CMOD Client]
-        FRSClient[FRS Proxy Client]
-        EmailClient[Email Client]
-        MailRoomClient[MailRoom Backend Client]
+    subgraph "Orchestration & Events"
+        SF["⚙️ Step Functions<br/>Bulk Download<br/>Workflow"]
+        EB["📮 EventBridge<br/>Event Bus"]
+        SQS["📬 SQS Queue<br/>Download Jobs"]
     end
 
-    subgraph "Data Layer"
-        DDB[DynamoDB]
-        S3[S3]
-        Secrets[Secrets Manager]
+    subgraph "Data & Storage Layer"
+        DDB["🗄️ DynamoDB<br/>Global Tables<br/>Config | ACLs | Audit"]
+        S3["🪣 S3 Buckets<br/>Bulk Downloads<br/>72h Lifecycle"]
+        Secrets["🔑 Secrets Manager<br/>Archive Credentials<br/>Auto-rotation"]
     end
 
-    WebApp --> APIGW
-    APIGW --> CogAuth
-    APIGW --> DocSvc
-    APIGW --> SearchSvc
-    APIGW --> DownloadSvc
-    APIGW --> CommentSvc
-    APIGW --> AdminSvc
-    APIGW --> AuthSvc
-    APIGW --> MailRoomSvc
+    subgraph "External Systems"
+        IESC["☁️ IESC<br/>REST API"]
+        IES["🏢 IES<br/>SOAP<br/>Direct Connect"]
+        CMOD["🏢 CMOD<br/>SOAP<br/>Direct Connect"]
+        FRS["🏢 FRS Proxy<br/>SOAP<br/>Direct Connect"]
+        MRBackend["☁️ MailRoom Backend<br/>REST API<br/>Independent Platform"]
+    end
 
-    DocSvc --> ArchiveAdapter
-    SearchSvc --> ArchiveAdapter
-    DownloadSvc --> ArchiveAdapter
+    %% Presentation to API
+    WebApp -->|HTTPS + JWT| APIGW
 
-    ArchiveAdapter --> IESCClient
-    ArchiveAdapter --> IESClient
-    ArchiveAdapter --> CMODClient
+    %% API Gateway to Auth & Services
+    APIGW -->|Validate Token| CogAuth
+    APIGW -->|Invoke| DocSvc
+    APIGW -->|Invoke| SearchSvc
+    APIGW -->|Invoke| DownloadSvc
+    APIGW -->|Invoke| CommentSvc
+    APIGW -->|Invoke| AdminSvc
+    APIGW -->|Invoke| AuthSvc
+    APIGW -->|Invoke| MailRoomSvc
 
-    DocSvc --> EventSvc
-    EventSvc --> FRSClient
-    DownloadSvc --> EmailClient
+    %% Document Service flows
+    DocSvc -->|Query/Write| DDB
+    DocSvc -->|Fetch Docs| IESC
+    DocSvc -->|Fetch Docs| IES
+    DocSvc -->|Fetch Docs| CMOD
+    DocSvc -->|Publish Events| EB
+    DocSvc -->|Get Credentials| Secrets
 
-    MailRoomSvc --> MailRoomClient
-    MailRoomSvc --> DDB
+    %% Search Service flows
+    SearchSvc -->|Query ACLs| DDB
+    SearchSvc -->|Search| IESC
+    SearchSvc -->|Search| IES
+    SearchSvc -->|Search| CMOD
+    SearchSvc -->|Get Credentials| Secrets
 
-    DocSvc --> DDB
-    CommentSvc --> DDB
-    AdminSvc --> DDB
-    DownloadSvc --> S3
+    %% Download Service flows
+    DownloadSvc -->|Start Workflow| SF
+    DownloadSvc -->|Query Status| DDB
+    SF -->|Enqueue Jobs| SQS
+    SQS -->|Trigger Worker| DocSvc
+    DocSvc -->|Upload Zip| S3
 
-    ArchiveAdapter --> Secrets
+    %% Comment & Admin Services
+    CommentSvc -->|CRUD Comments| DDB
+    AdminSvc -->|Manage Tenants/ACLs| DDB
+    AdminSvc -->|Store Credentials| Secrets
 
-    style DocSvc fill:#FF6B6B
-    style SearchSvc fill:#FF6B6B
-    style DownloadSvc fill:#FF6B6B
-    style MailRoomSvc fill:#FFD93D
+    %% Auth Service
+    AuthSvc -->|Token Operations| CogAuth
+    AuthSvc -->|Session Metadata| DDB
+
+    %% Event Service
+    EB -->|Trigger| EventSvc
+    EventSvc -->|Forward Events| FRS
+
+    %% MailRoom Wrapper Service
+    MailRoomSvc -->|Check ACLs/Audit| DDB
+    MailRoomSvc -->|API Calls| MRBackend
+
+    %% Styling
+    classDef awsCompute fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
+    classDef awsData fill:#3F8624,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef awsIntegration fill:#527FFF,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef awsSecurity fill:#DD344C,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef external fill:#879196,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef mailroom fill:#FF6B6B,stroke:#232F3E,stroke-width:2px,color:#fff
+
+    class DocSvc,SearchSvc,DownloadSvc,CommentSvc,AdminSvc,AuthSvc,EventSvc awsCompute
+    class MailRoomSvc mailroom
+    class DDB,S3 awsData
+    class APIGW,SF,EB,SQS awsIntegration
+    class CogAuth,Secrets awsSecurity
+    class IESC,IES,CMOD,FRS,MRBackend external
+    class WebApp awsIntegration
 ```
 
 ---
