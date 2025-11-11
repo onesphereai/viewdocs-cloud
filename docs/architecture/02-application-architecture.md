@@ -8,117 +8,167 @@
 
 ## 1. Application Components Overview
 
-### 1.1 Logical Architecture (AWS Components)
+### 1.1 Logical Architecture (AWS Components with Security)
 
 ```mermaid
 graph TB
+    subgraph "User Layer"
+        User["👤 End Users<br/>Browser/Mobile"]
+    end
+
+    subgraph "Security & CDN Layer"
+        R53["🌐 Route 53<br/>DNS + Health Checks<br/>Failover Routing"]
+        WAF["🛡️ WAF<br/>Web Application Firewall<br/>Rate Limiting | IP Filtering"]
+        CloudFront["☁️ CloudFront CDN<br/>Edge Locations<br/>TLS 1.2+ | HTTPS Only"]
+        Shield["🛡️ Shield Standard<br/>DDoS Protection<br/>Always On"]
+    end
+
     subgraph "Presentation Layer"
-        WebApp["☁️ CloudFront CDN<br/>───────────<br/>S3: Angular SPA"]
+        S3Static["🪣 S3 Bucket<br/>Static Website Hosting<br/>Angular SPA | Versioned"]
     end
 
     subgraph "API & Auth Layer"
-        APIGW["🔌 API Gateway<br/>REST API"]
-        CogAuth["🔐 Cognito<br/>User Pool<br/>SAML 2.0"]
+        APIGW["🔌 API Gateway<br/>REST API<br/>Throttling: 10K RPS"]
+        CogAuth["🔐 Cognito<br/>User Pool<br/>SAML 2.0 | MFA"]
     end
 
     subgraph "Application Services - Lambda Functions"
-        DocSvc["λ Document Service<br/>Node.js 20.x<br/>512MB | 29s"]
-        SearchSvc["λ Search Service<br/>Node.js 20.x<br/>512MB | 29s"]
-        DownloadSvc["λ Download Service<br/>Node.js 20.x<br/>256MB | 15s"]
-        CommentSvc["λ Comment Service<br/>Node.js 20.x<br/>256MB | 10s"]
-        AdminSvc["λ Admin Service<br/>Node.js 20.x<br/>512MB | 15s"]
-        AuthSvc["λ Auth Service<br/>Node.js 20.x<br/>256MB | 10s"]
-        EventSvc["λ Event Service<br/>Node.js 20.x<br/>256MB | 5s"]
-        MailRoomSvc["λ MailRoom Wrapper<br/>Node.js 20.x<br/>512MB | 29s"]
+        DocSvc["λ Document Service<br/>Node.js 20.x<br/>512MB | 29s | Concurrency: 100"]
+        SearchSvc["λ Search Service<br/>Node.js 20.x<br/>512MB | 29s | Concurrency: 100"]
+        DownloadSvc["λ Download Service<br/>Node.js 20.x<br/>256MB | 15s | Concurrency: 50"]
+        CommentSvc["λ Comment Service<br/>Node.js 20.x<br/>256MB | 10s | Concurrency: 50"]
+        AdminSvc["λ Admin Service<br/>Node.js 20.x<br/>512MB | 15s | Concurrency: 10"]
+        AuthSvc["λ Auth Service<br/>Node.js 20.x<br/>256MB | 10s | Concurrency: 50"]
+        EventSvc["λ Event Service<br/>Node.js 20.x<br/>256MB | 5s | Concurrency: 50"]
+        MailRoomSvc["λ MailRoom Wrapper<br/>Node.js 20.x<br/>512MB | 29s | Concurrency: 50"]
     end
 
     subgraph "Orchestration & Events"
-        SF["⚙️ Step Functions<br/>Bulk Download<br/>Workflow"]
-        EB["📮 EventBridge<br/>Event Bus"]
-        SQS["📬 SQS Queue<br/>Download Jobs"]
+        SF["⚙️ Step Functions<br/>Bulk Download Workflow<br/>Max Duration: 15min"]
+        EB["📮 EventBridge<br/>Event Bus<br/>Schema Registry"]
+        SQS["📬 SQS Queue<br/>Download Jobs<br/>FIFO | DLQ Enabled"]
     end
 
     subgraph "Data & Storage Layer"
-        DDB["🗄️ DynamoDB<br/>Global Tables<br/>Config | ACLs | Audit"]
-        S3["🪣 S3 Buckets<br/>Bulk Downloads<br/>72h Lifecycle"]
-        Secrets["🔑 Secrets Manager<br/>Archive Credentials<br/>Auto-rotation"]
+        DDB["🗄️ DynamoDB<br/>Global Tables<br/>Config | ACLs | Audit<br/>Encrypted at Rest KMS"]
+        S3["🪣 S3 Buckets<br/>Bulk Downloads<br/>72h Lifecycle | Encrypted"]
+        Secrets["🔑 Secrets Manager<br/>Archive Credentials<br/>Auto-rotation 90d | KMS"]
+    end
+
+    subgraph "Monitoring & Security"
+        CW["📊 CloudWatch<br/>Logs + Metrics<br/>Alarms"]
+        XRay["🔍 X-Ray<br/>Distributed Tracing<br/>Performance Analysis"]
+        GuardDuty["🛡️ GuardDuty<br/>Threat Detection<br/>Continuous Monitoring"]
+        KMS["🔐 KMS<br/>Encryption Keys<br/>Auto-rotation"]
     end
 
     subgraph "External Systems"
-        IESC["☁️ IESC<br/>REST API"]
-        IES["🏢 IES<br/>SOAP<br/>Direct Connect"]
-        CMOD["🏢 CMOD<br/>SOAP<br/>Direct Connect"]
-        FRS["🏢 FRS Proxy<br/>SOAP<br/>Direct Connect"]
+        IESC["☁️ IESC<br/>REST API<br/>TLS 1.2+"]
+        IES["🏢 IES<br/>SOAP API<br/>Direct Connect + IPsec"]
+        CMOD["🏢 CMOD<br/>SOAP API<br/>Direct Connect + IPsec"]
+        FRS["🏢 FRS Proxy<br/>SOAP API<br/>Direct Connect + IPsec"]
         MRBackend["☁️ MailRoom Backend<br/>REST API<br/>Independent Platform"]
     end
 
-    %% Presentation to API
-    WebApp -->|HTTPS + JWT| APIGW
+    %% User to CDN/Security
+    User -->|1. DNS Query| R53
+    R53 -->|2. Resolve to CloudFront| CloudFront
+    User -->|3. HTTPS Request| WAF
+    WAF -->|4. Filter Threats| Shield
+    Shield -->|5. Allow Traffic| CloudFront
+
+    %% CloudFront to Static & API
+    CloudFront -->|6. Serve Static Assets| S3Static
+    CloudFront -->|7. Proxy API Requests<br/>HTTPS + JWT Bearer| APIGW
 
     %% API Gateway to Auth & Services
-    APIGW -->|Validate Token| CogAuth
-    APIGW -->|Invoke| DocSvc
-    APIGW -->|Invoke| SearchSvc
-    APIGW -->|Invoke| DownloadSvc
-    APIGW -->|Invoke| CommentSvc
-    APIGW -->|Invoke| AdminSvc
-    APIGW -->|Invoke| AuthSvc
-    APIGW -->|Invoke| MailRoomSvc
+    APIGW -->|8. Validate JWT| CogAuth
+    CogAuth -.->|9. Token Valid<br/>Return User Claims| APIGW
+    APIGW -->|10a. Invoke Lambda<br/>Sync| DocSvc
+    APIGW -->|10b. Invoke Lambda<br/>Sync| SearchSvc
+    APIGW -->|10c. Invoke Lambda<br/>Sync| DownloadSvc
+    APIGW -->|10d. Invoke Lambda<br/>Sync| CommentSvc
+    APIGW -->|10e. Invoke Lambda<br/>Sync| AdminSvc
+    APIGW -->|10f. Invoke Lambda<br/>Sync| AuthSvc
+    APIGW -->|10g. Invoke Lambda<br/>Sync| MailRoomSvc
 
     %% Document Service flows
-    DocSvc -->|Query/Write| DDB
-    DocSvc -->|Fetch Docs| IESC
-    DocSvc -->|Fetch Docs| IES
-    DocSvc -->|Fetch Docs| CMOD
-    DocSvc -->|Publish Events| EB
-    DocSvc -->|Get Credentials| Secrets
+    DocSvc -->|11a. Query ACLs<br/>Write Audit Logs| DDB
+    DocSvc -->|11b. Fetch Document<br/>REST HTTPS| IESC
+    DocSvc -->|11c. Fetch Document<br/>SOAP over IPsec| IES
+    DocSvc -->|11d. Fetch Document<br/>SOAP over IPsec| CMOD
+    DocSvc -->|11e. Publish Event<br/>DocumentViewed| EB
+    DocSvc -->|11f. Get Archive Credentials<br/>Encrypted| Secrets
 
     %% Search Service flows
-    SearchSvc -->|Query ACLs| DDB
-    SearchSvc -->|Search| IESC
-    SearchSvc -->|Search| IES
-    SearchSvc -->|Search| CMOD
-    SearchSvc -->|Get Credentials| Secrets
+    SearchSvc -->|12a. Query User ACLs<br/>Filter Folders| DDB
+    SearchSvc -->|12b. Search Index<br/>REST HTTPS| IESC
+    SearchSvc -->|12c. Search Index<br/>SOAP over IPsec| IES
+    SearchSvc -->|12d. Search Index<br/>SOAP over IPsec| CMOD
+    SearchSvc -->|12e. Get Credentials<br/>Decrypt| Secrets
 
     %% Download Service flows
-    DownloadSvc -->|Start Workflow| SF
-    DownloadSvc -->|Query Status| DDB
-    SF -->|Enqueue Jobs| SQS
-    SQS -->|Trigger Worker| DocSvc
-    DocSvc -->|Upload Zip| S3
+    DownloadSvc -->|13a. Start Execution<br/>Async Workflow| SF
+    DownloadSvc -->|13b. Query Job Status| DDB
+    SF -->|13c. Enqueue Jobs<br/>Fan-out per Doc| SQS
+    SQS -->|13d. Trigger Worker<br/>Event Source Mapping| DocSvc
+    DocSvc -->|13e. Upload Zip File<br/>Server-side Encryption| S3
 
     %% Comment & Admin Services
-    CommentSvc -->|CRUD Comments| DDB
-    AdminSvc -->|Manage Tenants/ACLs| DDB
-    AdminSvc -->|Store Credentials| Secrets
+    CommentSvc -->|14a. CRUD Comments<br/>Versioned| DDB
+    AdminSvc -->|14b. Manage Tenants<br/>Create/Update ACLs| DDB
+    AdminSvc -->|14c. Store Credentials<br/>Encrypt with KMS| Secrets
 
     %% Auth Service
-    AuthSvc -->|Token Operations| CogAuth
-    AuthSvc -->|Session Metadata| DDB
+    AuthSvc -->|15a. Token Refresh<br/>SAML Callback| CogAuth
+    AuthSvc -->|15b. Store Session Metadata| DDB
 
     %% Event Service
-    EB -->|Trigger| EventSvc
-    EventSvc -->|Forward Events| FRS
+    EB -->|16a. Rule Trigger<br/>Event Pattern Match| EventSvc
+    EventSvc -->|16b. Forward to HUB<br/>SOAP over IPsec| FRS
 
     %% MailRoom Wrapper Service
-    MailRoomSvc -->|Check ACLs/Audit| DDB
-    MailRoomSvc -->|API Calls| MRBackend
+    MailRoomSvc -->|17a. Check ACLs<br/>Write Audit Logs| DDB
+    MailRoomSvc -->|17b. Forward Request<br/>REST HTTPS + tenant_id| MRBackend
+
+    %% Security & Monitoring connections
+    DocSvc -.->|Logs| CW
+    SearchSvc -.->|Logs| CW
+    DownloadSvc -.->|Logs| CW
+    CommentSvc -.->|Logs| CW
+    AdminSvc -.->|Logs| CW
+    AuthSvc -.->|Logs| CW
+    EventSvc -.->|Logs| CW
+    MailRoomSvc -.->|Logs| CW
+
+    DocSvc -.->|Traces| XRay
+    SearchSvc -.->|Traces| XRay
+    APIGW -.->|Traces| XRay
+
+    DDB -.->|Encrypt/Decrypt| KMS
+    S3 -.->|Encrypt/Decrypt| KMS
+    Secrets -.->|Encrypt/Decrypt| KMS
+
+    GuardDuty -.->|Monitor Threats<br/>VPC Flow Logs| CW
 
     %% Styling
     classDef awsCompute fill:#FF9900,stroke:#232F3E,stroke-width:2px,color:#232F3E
     classDef awsData fill:#3F8624,stroke:#232F3E,stroke-width:2px,color:#fff
     classDef awsIntegration fill:#527FFF,stroke:#232F3E,stroke-width:2px,color:#fff
     classDef awsSecurity fill:#DD344C,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef awsMonitoring fill:#759C3E,stroke:#232F3E,stroke-width:2px,color:#fff
     classDef external fill:#879196,stroke:#232F3E,stroke-width:2px,color:#fff
     classDef mailroom fill:#FF6B6B,stroke:#232F3E,stroke-width:2px,color:#fff
+    classDef user fill:#232F3E,stroke:#FF9900,stroke-width:3px,color:#fff
 
+    class User user
     class DocSvc,SearchSvc,DownloadSvc,CommentSvc,AdminSvc,AuthSvc,EventSvc awsCompute
     class MailRoomSvc mailroom
-    class DDB,S3 awsData
-    class APIGW,SF,EB,SQS awsIntegration
-    class CogAuth,Secrets awsSecurity
+    class DDB,S3,S3Static awsData
+    class APIGW,SF,EB,SQS,CloudFront,R53 awsIntegration
+    class CogAuth,Secrets,WAF,Shield,KMS,GuardDuty awsSecurity
+    class CW,XRay awsMonitoring
     class IESC,IES,CMOD,FRS,MRBackend external
-    class WebApp awsIntegration
 ```
 
 ---
